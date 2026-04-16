@@ -8,7 +8,7 @@ scikit-learn>=1.3.0
 xgboost>=2.0.0
 
 # LSTM (forecast): CPU; tensorflow padrao em pip
-tensorflow>=2.14.0
+tensorflow>=2.14.0; python_version < "3.13"
 
 # MLflow
 mlflow>=2.10.0
