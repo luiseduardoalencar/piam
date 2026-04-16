@@ -677,18 +677,17 @@ def render_feature_impact_tab() -> None:
 
     st.metric("Total de features", len(df))
     st.dataframe(
-        df[["feature_label", "spearman", "abs_spearman"]].rename(
+        df[["feature_label", "spearman"]].rename(
             columns={
                 "feature_label": "Feature",
-                "spearman": "Spearman",
-                "abs_spearman": "|Spearman|",
+                "spearman": "Grau de impacto"
             }
         ),
         width="stretch",
         hide_index=True,
     )
 
-    top_n = st.slider("Top N por |Spearman|", min_value=5, max_value=min(30, len(df)), value=15)
+    top_n = st.slider("Top N por Grau de Impacto", min_value=5, max_value=min(30, len(df)), value=15)
     top = df.head(top_n).sort_values("spearman")
     top["sentido"] = np.where(top["spearman"] >= 0, "Positivo", "Negativo")
 
@@ -699,10 +698,10 @@ def render_feature_impact_tab() -> None:
         orientation="h",
         color="sentido",
         color_discrete_map={"Positivo": "#2e7d32", "Negativo": "#c62828"},
-        title=f"Top {top_n} features por |Spearman|",
+        title=f"Top {top_n} features por Grau de Impacto",
         labels={
             "feature_label": "Feature",
-            "spearman": "Spearman",
+            "spearman": "Grau de impacto",
             "sentido": "Impacto",
         },
         hover_data={"feature": True, "feature_label": False, "spearman": ":.4f"},
