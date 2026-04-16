@@ -464,7 +464,7 @@ def _show_profile_modal(profile: dict[str, Any], highlight_features: list[str]) 
         if k not in shown_front
     ]
     if details_rows:
-        st.dataframe(pd.DataFrame(details_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(details_rows), width="stretch", hide_index=True)
     else:
         st.info("Sem outras features para exibir.")
 
@@ -516,14 +516,14 @@ def _render_prediction_results() -> None:
                 "sinistralidade_prevista_%",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
     chart_df = out.sort_values("sinistralidade_prevista_perfil", ascending=False).head(15)
     st.bar_chart(
         chart_df.set_index("profile_id")["sinistralidade_prevista_perfil"],
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -650,7 +650,7 @@ def render_prediction_tab() -> None:
         selection_df = profiles[profiles["profile_id"].isin(selected_profiles)][["profile_id", "plano"]].copy()
         selection_df["proporcao_%"] = selection_df["profile_id"].map(percentages).fillna(0.0)
         selection_df["proporcao_%"] = selection_df["proporcao_%"].round(2)
-        st.dataframe(selection_df, use_container_width=True, hide_index=True)
+        st.dataframe(selection_df, width="stretch", hide_index=True)
     else:
         st.info("Selecione ao menos um perfil para habilitar a simulação.")
 
@@ -684,7 +684,7 @@ def render_feature_impact_tab() -> None:
                 "abs_spearman": "|Spearman|",
             }
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -714,7 +714,7 @@ def render_feature_impact_tab() -> None:
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
     )
     fig.update_traces(marker_line_width=0)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_forecast_tab() -> None:
@@ -812,19 +812,19 @@ def render_forecast_tab() -> None:
         },
     )
     fig.update_yaxes(title="Sinistralidade (%)")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     summary = pd.DataFrame(
         {
             "Série": ["Meses históricos", "Meses previstos", "Início previsão"],
             "Valor": [
-                int(len(observed_monthly)),
-                int(len(forecast_monthly)),
+                str(int(len(observed_monthly))),
+                str(int(len(forecast_monthly))),
                 forecast_monthly["competencia_mes"].min().strftime("%Y-%m") if not forecast_monthly.empty else "-",
             ],
         }
     )
-    st.dataframe(summary, hide_index=True, use_container_width=True)
+    st.dataframe(summary, hide_index=True, width="stretch")
 
 
 def main() -> None:
