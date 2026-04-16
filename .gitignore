@@ -1,0 +1,83 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Outputs
+outputs/
+*.pkl
+*.joblib
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+# OS
+.DS_Store
+Thumbs.db
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Logs
+*.log
+
+# Dados
+# Regra geral: ignora todos os dados.
+data/**
+
+# Mantém somente os artefatos necessários para a aplicação Streamlit.
+!data/processed/
+!data/processed/elgin/
+
+!data/processed/elgin/feature-impact/
+!data/processed/elgin/feature-impact/v3/
+!data/processed/elgin/feature-impact/v3/feature_correlation_sinistralidade.csv
+
+!data/processed/elgin/forecast/
+!data/processed/elgin/forecast/v1/
+!data/processed/elgin/forecast/v1/sinistralidade_forecast_completo.csv
+
+!data/processed/elgin/predict/
+!data/processed/elgin/predict/v*/
+!data/processed/elgin/predict/v*/catalogo_perfis_top100.json
+!data/processed/elgin/predict/v12/models/
+!data/processed/elgin/predict/v12/models/model_MASTER_EMPRESARIAL.pkl
+
+# Mantém exemplos da pasta raw, se existirem.
+!data/raw/
+!data/raw/.gitkeep
+!data/raw/exemplo_receitas.csv
+
+mvp/
