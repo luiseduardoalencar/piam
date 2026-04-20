@@ -4,12 +4,12 @@
   "n_total_base_mes": 2617,
   "intervencoes": [
     {
-      "feature": "idade",
-      "delta_pct": -47.0,
+      "feature": "qtd_conta_INTERNADO",
+      "delta_pct": -76.0,
       "n_elegiveis": 2617,
       "n_nao_elegiveis": 0
     }
   ],
   "pct_base_afetada": 100.0,
-  "modo_idade": "correlacionado"
+  "modo_idade": "simples"
 }

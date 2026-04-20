@@ -1,17 +1,17 @@
 {
   "competencia_referencia": "2025-10",
   "sinistralidade_antes": 0.947181,
-  "sinistralidade_depois": 0.944404,
-  "delta_absoluto": -0.00277774,
-  "delta_relativo_pct": -0.2933,
+  "sinistralidade_depois": 0.951153,
+  "delta_absoluto": 0.00397206,
+  "delta_relativo_pct": 0.4194,
   "n_individuos_afetados": 2617,
   "n_individuos_nao_elegiveis": 0,
   "intervencoes": [
     {
-      "feature": "idade",
-      "delta_pct": -47.0
+      "feature": "qtd_conta_INTERNADO",
+      "delta_pct": -76.0
     }
   ],
-  "modo_idade": "correlacionado",
+  "modo_idade": "simples",
   "versao_modelo": "v20"
 }

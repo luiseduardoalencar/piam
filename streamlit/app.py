@@ -707,6 +707,8 @@ def render_prediction_tab() -> None:
     baseline_inicial = None
     if ultimo_resultado and "sinistralidade_antes" in ultimo_resultado:
         baseline_inicial = float(ultimo_resultado.get("sinistralidade_antes", float("nan")))
+    if st.session_state.get("pred_features_hide_baseline_ui"):
+        baseline_inicial = None
     render_calibracao_mes_section(kpi_mes=kpi, baseline_predito=baseline_inicial)
 
     try:
@@ -748,7 +750,24 @@ def render_prediction_tab() -> None:
             help=MODO_IDADE_RADIO_HELP,
         )
 
-    if st.button("Executar inferência what-if", type="primary"):
+    b_exec, b_clear = st.columns(2)
+    with b_exec:
+        run_clicked = st.button("Executar inferência what-if", type="primary", use_container_width=True)
+    with b_clear:
+        clear_clicked = st.button(
+            "Limpar última inferência",
+            type="secondary",
+            use_container_width=True,
+            help="Remove da sessão o painel de resultados e o baseline predito na calibração até nova execução.",
+        )
+
+    if clear_clicked:
+        for k in ("pred_features_last_output", "pred_features_last_ok", "pred_features_last_version"):
+            st.session_state.pop(k, None)
+        st.session_state["pred_features_hide_baseline_ui"] = True
+        st.rerun()
+
+    if run_clicked:
         ok, output = _run_predict_features(
             version_label=version_label,
             feature=feat_name,
@@ -758,6 +777,8 @@ def render_prediction_tab() -> None:
         st.session_state["pred_features_last_output"] = output
         st.session_state["pred_features_last_ok"] = ok
         st.session_state["pred_features_last_version"] = version_label
+        if ok:
+            st.session_state["pred_features_hide_baseline_ui"] = False
         st.rerun()
 
     if "pred_features_last_ok" in st.session_state:
