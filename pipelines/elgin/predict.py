@@ -25,6 +25,7 @@ Saídas por execução (pasta ``data/processed/elgin/predict/v{N}/``):
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -60,9 +61,9 @@ COMPANY = "elgin"
 TRANSFORMED_PARQUET_PATH = (
     ROOT_DIR
     / "data"
-    / "processed"
+    / "raw"
     / COMPANY
-    / "base_analitica_transformada"
+    / "base_analitica"
     / "painel_sinistralidade_v1.parquet"
 )
 FEATURE_CATALOG_PATH = ROOT_DIR / "data" / "auxiliar" / COMPANY / "feature_catalog.csv"
@@ -88,6 +89,23 @@ LEAKAGE_COLS: frozenset[str] = frozenset(
     }
 )
 
+FEATURES_BLOQUEADAS_INTERVENCAO: frozenset[str] = frozenset(
+    {
+        PREMIUM_COL,
+        TARGET_COL,
+        "sinistralidade_raw",
+        "valor_sinistro_raw",
+        "valor_sinistro_alt_val",
+        "valor_sinistro_ajustado",
+        "sin_ref",
+        "fator_ajuste_m",
+        "S_real_m",
+        "F_real_m",
+        "cod_beneficiario",
+        "competencia",
+    }
+)
+
 HOLDOUT_FRAC = 0.15
 N_SPLITS_CV = 5
 RANDOM_STATE = 42
@@ -98,15 +116,11 @@ BENEFICIARIO_COL = "cod_beneficiario"
 
 # Catálogo de perfis para UI (top N por valor_sinistro_raw)
 TOP_PERFIS_N = 100
+FEATURES_INTERVENCAO_FILENAME = "catalogo_features_intervencao.json"
 
 # MLflow — alinhado a ``pipelines/mvp/predict.py`` + ``config/mlflow_config.py``
 MLFLOW_EXPERIMENT_NAME = "piam-elgin-predict"
 MLFLOW_REGISTERED_MODEL_NAME = "elgin-sinistralidade-two-stage"
-
-PLANO_MAP = {
-    "EMPRESARIAL MASTER": "MASTER EMPRESARIAL",
-    "COLETIVO EMPRESARIAL MASTER - PROTOCOLO ANS: 414538991": "MASTER EMPRESARIAL",
-}
 
 try:
     import lightgbm as lgb
@@ -167,7 +181,6 @@ def payload_do_parquet_por_indice(
     if not path.is_file():
         raise FileNotFoundError(f"Parquet não encontrado: {path}")
     df = pd.read_parquet(path)
-    df[SEGMENT_COL] = df[SEGMENT_COL].replace(PLANO_MAP)
     prem_ok = pd.to_numeric(df[PREMIUM_COL], errors="coerce").fillna(0.0) > 0.0
     df = df.loc[prem_ok].copy().reset_index(drop=True)
     if indice < 0 or indice >= len(df):
@@ -176,9 +189,6 @@ def payload_do_parquet_por_indice(
             f"(n={len(df):,} linhas após filtro prêmio > 0)."
         )
     row = df.iloc[indice].copy()
-    if SEGMENT_COL in row.index and pd.notna(row[SEGMENT_COL]):
-        chave = str(row[SEGMENT_COL]).strip()
-        row[SEGMENT_COL] = PLANO_MAP.get(chave, row[SEGMENT_COL])
     return serie_para_payload(row, excluir_alvo=True)
 
 
@@ -427,11 +437,19 @@ class TwoStageModel:
 
 
 def aggregate_sinistralidade_macro(y_pred: np.ndarray, premio: pd.Series) -> float:
+    """
+    Média ponderada do índice de sinistralidade pelo prêmio: ``sum(y_hat * premio) / sum(premio)``.
+    Ver comentário homólogo em ``predict-agregado.py``.
+    """
     premio = pd.to_numeric(premio, errors="coerce").fillna(0.0)
     denom = float(premio.sum())
     if denom == 0.0:
         return float("nan")
-    return float(np.asarray(y_pred, dtype=float).sum() / denom)
+    y = np.asarray(y_pred, dtype=float).ravel()
+    p = np.asarray(premio, dtype=float).ravel()
+    if y.shape != p.shape:
+        raise ValueError(f"y_pred e premio devem ter o mesmo tamanho: {y.shape} vs {p.shape}")
+    return float((y * p).sum() / denom)
 
 
 def build_catalogo_perfis_top100(
@@ -526,7 +544,6 @@ def build_catalogo_perfis_top100(
         }
 
     df = pd.read_parquet(TRANSFORMED_PARQUET_PATH)
-    df[SEGMENT_COL] = df[SEGMENT_COL].replace(PLANO_MAP)
     prem_ok = pd.to_numeric(df[PREMIUM_COL], errors="coerce").fillna(0.0) > 0.0
     df = df.loc[prem_ok].copy().reset_index(drop=True)
     df.insert(0, "indice_parquet", np.arange(len(df), dtype=np.int64))
@@ -579,6 +596,96 @@ def build_catalogo_perfis_top100(
             "Preferir gerar o catálogo a partir do pipeline de treino."
         ),
         "perfis": perfis_legacy,
+    }
+
+
+def _descricao_regra_elegibilidade(feature: str) -> str:
+    regras_txt: dict[str, str] = {
+        "qtd_servico_CARDIOLOGIA": "idade >= 30",
+        "qtd_servico_QUIMIOTERAPIA": "qtd_servico_QUIMIOTERAPIA > 0",
+        "qtd_servico_ENDOSCOPIA": "idade >= 40",
+        "qtd_servico_CIRURGICO": "idade >= 12",
+        "qtd_servico_DIÁRIA": "qtd_conta_INTERNADO > 0",
+        "qtd_esp_cardio": "idade >= 30",
+        "qtd_esp_ped": "idade <= 18",
+        "qtd_esp_gine": "sexo == 'F'",
+        "qtd_esp_cirurg": "idade >= 12",
+        "qtd_carater_eletivo": "tipo_cadastro == 'TITULAR'",
+        "qtd_conta_INTERNADO": "delta>0: qtd_conta_INTERNADO > 0 | delta<0: universal",
+    }
+    return regras_txt.get(feature, "universal")
+
+
+def build_catalogo_features_intervencao_mensal(
+    *,
+    version_label: str,
+    df_mes: pd.DataFrame,
+    fc: pd.DataFrame,
+    competencia_ref: str,
+) -> dict[str, Any]:
+    from pipelines.predict.what_if.elegibilidade import calcular_elegibilidade
+
+    feature_to_category = (
+        fc[["feature_name", "category"]]
+        .dropna(subset=["feature_name"])
+        .assign(feature_name=lambda x: x["feature_name"].astype(str))
+        .set_index("feature_name")["category"]
+        .to_dict()
+    )
+    feature_to_dtype = (
+        fc[["feature_name", "dtype"]]
+        .dropna(subset=["feature_name"])
+        .assign(feature_name=lambda x: x["feature_name"].astype(str))
+        .set_index("feature_name")["dtype"]
+        .to_dict()
+    )
+
+    dtypes_intervencionaveis = {"numeric", "count"}
+    elegiveis_catalogo = set(catalog_eligible_names(fc))
+    candidatas = [
+        c
+        for c in sorted(df_mes.columns)
+        if (
+            c in elegiveis_catalogo
+            and c not in FEATURES_BLOQUEADAS_INTERVENCAO
+            and str(feature_to_dtype.get(c, "")).lower() in dtypes_intervencionaveis
+        )
+    ]
+
+    n_total = int(len(df_mes))
+    grupos: dict[str, list[dict[str, Any]]] = {}
+    for feat in candidatas:
+        mask_pos = calcular_elegibilidade(df_mes, feat, 20.0)
+        mask_neg = calcular_elegibilidade(df_mes, feat, -20.0)
+        serie = pd.to_numeric(df_mes[feat], errors="coerce").fillna(0.0)
+
+        item = {
+            "feature": feat,
+            "categoria": str(feature_to_category.get(feat, "sem_categoria")),
+            "dtype_catalogo": str(feature_to_dtype.get(feat, "n/a")),
+            "regra_elegibilidade": _descricao_regra_elegibilidade(feat),
+            "n_elegiveis_delta_positivo": int(mask_pos.sum()),
+            "n_elegiveis_delta_negativo": int(mask_neg.sum()),
+            "n_nao_elegiveis_delta_positivo": int(n_total - int(mask_pos.sum())),
+            "n_com_valor_atual_gt_zero_total": int((serie > 0.0).sum()),
+            "n_com_valor_atual_gt_zero_elegiveis_delta_positivo": int(((serie > 0.0) & mask_pos).sum()),
+            "pct_base_elegivel_delta_positivo": round(float(mask_pos.sum()) / max(1, n_total) * 100.0, 2),
+        }
+        grupo = item["categoria"]
+        grupos.setdefault(grupo, []).append(item)
+
+    grupos_lista: list[dict[str, Any]] = []
+    for grupo_nome in sorted(grupos):
+        feats = sorted(grupos[grupo_nome], key=lambda x: x["feature"])
+        grupos_lista.append({"grupo": grupo_nome, "n_features": len(feats), "features": feats})
+
+    return {
+        "versao_pasta": version_label,
+        "competencia_referencia": competencia_ref,
+        "n_total_base_mes": n_total,
+        "n_features_intervencionaveis": len(candidatas),
+        "descricao": "Catálogo de features intervencionáveis para what-if no snapshot mensal.",
+        "grupos": grupos_lista,
     }
 
 
@@ -707,9 +814,9 @@ def _mlflow_log_run_elgin_inner(
         # Só o catálogo top-100 como artefato do run (resto permanece em ``run_dir`` no disco).
         # O ``.pkl`` não é logado em separado: ``mlflow.pyfunc.log_model`` já embute ``model_pkl``
         # no pacote do modelo (necessário para ``models:/.../latest``).
-        cat_path = run_dir / "catalogo_perfis_top100.json"
-        if cat_path.is_file():
-            mlflow.log_artifact(str(cat_path), artifact_path="elgin_artifacts")
+        cat_feat_path = run_dir / FEATURES_INTERVENCAO_FILENAME
+        if cat_feat_path.is_file():
+            mlflow.log_artifact(str(cat_feat_path), artifact_path="elgin_artifacts")
 
         if (
             model_path is not None
@@ -746,7 +853,7 @@ def _mlflow_log_run_elgin_inner(
     print(f"[MLflow] Run concluído no experimento «{MLFLOW_EXPERIMENT_NAME}».")
 
 
-def run_training_pipeline() -> None:
+def run_training_pipeline(*, log_mlflow: bool = False) -> None:
     if not TRANSFORMED_PARQUET_PATH.is_file():
         raise FileNotFoundError(
             f"Base transformada não encontrada: {TRANSFORMED_PARQUET_PATH}\n"
@@ -757,7 +864,6 @@ def run_training_pipeline() -> None:
     print(f"[Carga] {TRANSFORMED_PARQUET_PATH} | shape={df_raw.shape}")
 
     fc = load_feature_catalog()
-    df_raw[SEGMENT_COL] = df_raw[SEGMENT_COL].replace(PLANO_MAP)
 
     n_before_q = len(df_raw)
     prem_ok = pd.to_numeric(df_raw[PREMIUM_COL], errors="coerce").fillna(0.0) > 0.0
@@ -901,19 +1007,21 @@ def run_training_pipeline() -> None:
             outlier_cap_pct=OUTLIER_CAP_PCT,
         )
 
-        raw_ho = model_final._predict_raw(X_ho)
+        # Calibração macro SEM leakage: usar predição bruta do modelo de holdout
+        # (treinado apenas em treino) sobre X_ho.
+        raw_ho = model_ho._predict_raw(X_ho)
         sin_real_h = aggregate_sinistralidade_macro(y_ho.values, fat_ho)
         sin_pred_raw_h = aggregate_sinistralidade_macro(raw_ho, fat_ho)
+        macro_scale = 1.0
         if (
             sin_pred_raw_h
             and not np.isnan(sin_pred_raw_h)
             and abs(sin_pred_raw_h) > 1e-15
         ):
-            model_final.macro_scale = float(sin_real_h / sin_pred_raw_h)
-        else:
-            model_final.macro_scale = 1.0
+            macro_scale = float(sin_real_h / sin_pred_raw_h)
+        model_final.macro_scale = macro_scale
         print(
-            f"[Calibração macro] fator holdout (real/pred bruto): "
+            f"[Calibração macro] fator holdout (real/pred bruto, sem leakage): "
             f"{model_final.macro_scale:.4f}"
         )
 
@@ -993,44 +1101,56 @@ def run_training_pipeline() -> None:
         metrics_mlflow["holdout_macro_sin_pred"] = float(sin_pred_g)
         metrics_mlflow["holdout_macro_erro_relativo"] = float(erro_rel)
 
-    catalog_path = RUN_DIR / "catalogo_perfis_top100.json"
     try:
-        cat = build_catalogo_perfis_top100(
-            VERSION_LABEL,
-            df_raw_aligned=df_raw,
-            df_feat=df,
-            feature_cols=feature_cols,
+        comp_ref = str(pd.to_datetime(df_raw[TIME_COL], errors="coerce").max().strftime("%Y-%m"))
+        comp_dt = pd.to_datetime(df_raw[TIME_COL], errors="coerce")
+        mask_comp = comp_dt.dt.to_period("M") == pd.Period(comp_ref, freq="M")
+        df_mes_ref = df_raw.loc[mask_comp].copy().reset_index(drop=True)
+        cat_feat = build_catalogo_features_intervencao_mensal(
+            version_label=VERSION_LABEL,
+            df_mes=df_mes_ref,
+            fc=fc,
+            competencia_ref=comp_ref,
         )
-        with open(catalog_path, "w", encoding="utf-8") as f:
-            json.dump(cat, f, indent=2, ensure_ascii=False)
-        print(f"[Artefato] {catalog_path}")
+        catalog_feat_path = RUN_DIR / FEATURES_INTERVENCAO_FILENAME
+        with open(catalog_feat_path, "w", encoding="utf-8") as f:
+            json.dump(cat_feat, f, indent=2, ensure_ascii=False)
+        print(f"[Artefato] {catalog_feat_path}")
     except Exception as e:
-        print(f"[aviso] catalogo_perfis_top100: {e}")
+        print(f"[aviso] catalogo_features_intervencao: {e}")
 
     if last_model_final is not None and last_model_path is not None:
         metrics_mlflow["macro_scale"] = float(
             getattr(last_model_final, "macro_scale", 1.0)
         )
 
-    _mlflow_log_run_elgin(
-        run_dir=RUN_DIR,
-        version_label=VERSION_LABEL,
-        model_path=last_model_path,
-        input_example=last_input_example,
-        model_final=last_model_final,
-        params_extra={
-            "n_features": len(feature_cols),
-            "n_linhas_pos_filtro_premio": len(df_raw),
-            "segmentos_treinados": ",".join(trained_segments),
-        },
-        metrics_extra=metrics_mlflow,
-    )
+    if log_mlflow:
+        _mlflow_log_run_elgin(
+            run_dir=RUN_DIR,
+            version_label=VERSION_LABEL,
+            model_path=last_model_path,
+            input_example=last_input_example,
+            model_final=last_model_final,
+            params_extra={
+                "n_features": len(feature_cols),
+                "n_linhas_pos_filtro_premio": len(df_raw),
+                "segmentos_treinados": ",".join(trained_segments),
+            },
+            metrics_extra=metrics_mlflow,
+        )
 
     print(f"\n=== Concluído — saída em {RUN_DIR} ===")
 
 
 # %%
 if __name__ == "__main__":
-    run_training_pipeline()
+    parser = argparse.ArgumentParser(description="Treino mensal ELGIN (sinistralidade)")
+    parser.add_argument(
+        "--mlflow",
+        action="store_true",
+        help="Após gravar artefatos locais, registar run/modelo no MLflow",
+    )
+    args = parser.parse_args()
+    run_training_pipeline(log_mlflow=args.mlflow)
 
 # %%

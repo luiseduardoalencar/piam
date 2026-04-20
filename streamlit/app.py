@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import re
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -28,28 +29,32 @@ FEATURE_IMPACT_CSV = (
     / "v3"
     / "feature_correlation_sinistralidade.csv"
 )
-FORECAST_CSV = (
-    ROOT_DIR
-    / "data"
-    / "processed"
-    / "elgin"
-    / "forecast"
-    / "v1"
-    / "sinistralidade_forecast_completo.csv"
+FEATURE_IMPACT_ROOT = ROOT_DIR / "data" / "processed" / "elgin" / "feature-impact"
+FORECAST_ROOT = ROOT_DIR / "data" / "processed" / "elgin" / "forecast"
+RAW_PANEL_PARQUET = (
+    ROOT_DIR / "data" / "raw" / "elgin" / "base_analitica" / "painel_sinistralidade_v1.parquet"
 )
 SIMULATION_SIZE = 50_000
-DEFAULT_MODEL_PATH = (
-    ROOT_DIR
-    / "data"
-    / "processed"
-    / "elgin"
-    / "predict"
-    / "v12"
-    / "models"
-    / "model_MASTER_EMPRESARIAL.pkl"
-)
 AUTH_EMAIL = "marso@email.com"
 AUTH_PASSWORD = "1234"
+QUASI_LEAKAGE_HIDE: set[str] = {
+    "qtd_eventos_sinistro",
+    "qtd_carater_eletivo",
+    "qtd_carater_urgencia",
+}
+
+# Modo de idade (what-if): valores enviados ao pipeline devem ser "simples" | "correlacionado"
+MODO_IDADE_LABEL: dict[str, str] = {
+    "simples": "Só idade (efeito isolado)",
+    "correlacionado": "Idade + correlacionados (cenário plausível)",
+}
+MODO_IDADE_RADIO_HELP = (
+    "**Só idade:** altera apenas a coluna `idade`; o restante do painel do mês permanece igual. "
+    "Útil para **auditoria** e para ver o **efeito marginal** da idade, sem impor outras hipóteses.\n\n"
+    "**Idade + correlacionados:** além da idade, o motor aplica **ajustes amortecidos** em variáveis "
+    "associadas (regras heurísticas do what-if). Tende a ser **mais rico em narrativa operacional**, "
+    "por imitar um perfil que se move em conjunto."
+)
 
 
 def require_login() -> bool:
@@ -172,11 +177,37 @@ def load_profiles() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
-def load_feature_impact_csv() -> pd.DataFrame:
-    if not FEATURE_IMPACT_CSV.is_file():
-        raise FileNotFoundError(f"Arquivo nao encontrado: {FEATURE_IMPACT_CSV}")
-    df = pd.read_csv(FEATURE_IMPACT_CSV)
+def _latest_feature_impact_version_dir() -> Path:
+    if not FEATURE_IMPACT_ROOT.is_dir():
+        raise FileNotFoundError(f"Diretório não encontrado: {FEATURE_IMPACT_ROOT}")
+    candidates = [p for p in FEATURE_IMPACT_ROOT.iterdir() if p.is_dir() and re.fullmatch(r"v\d+", p.name, re.IGNORECASE)]
+    if not candidates:
+        raise FileNotFoundError("Nenhuma versão vN encontrada em data/processed/elgin/feature-impact")
+    return max(candidates, key=lambda p: _version_key(p.name))
+
+
+def list_feature_impact_competencias() -> tuple[Path, list[str]]:
+    ver_dir = _latest_feature_impact_version_dir()
+    comps = [p.name for p in ver_dir.iterdir() if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}", p.name)]
+    comps = sorted(comps)
+    return ver_dir, comps
+
+
+def load_feature_impact_csv(competencia: str | None = None) -> tuple[pd.DataFrame, str]:
+    # Novo formato: vN/<YYYY-MM>/feature_correlation_sinistralidade.csv
+    ver_dir, comps = list_feature_impact_competencias()
+    if comps:
+        comp_sel = competencia if competencia in comps else comps[-1]
+        csv_path = ver_dir / comp_sel / "feature_correlation_sinistralidade.csv"
+    else:
+        # Fallback legado (v3 único CSV)
+        comp_sel = "legado"
+        csv_path = FEATURE_IMPACT_CSV
+
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Arquivo nao encontrado: {csv_path}")
+
+    df = pd.read_csv(csv_path)
     req = {"feature", "spearman"}
     miss = req - set(df.columns)
     if miss:
@@ -184,18 +215,168 @@ def load_feature_impact_csv() -> pd.DataFrame:
     df["spearman"] = pd.to_numeric(df["spearman"], errors="coerce")
     df = df.dropna(subset=["spearman"])
     df["abs_spearman"] = df["spearman"].abs()
-    return df.sort_values("abs_spearman", ascending=False).reset_index(drop=True)
+    return df.sort_values("abs_spearman", ascending=False).reset_index(drop=True), comp_sel
 
 
-@st.cache_data(show_spinner=False)
 def load_forecast_csv() -> pd.DataFrame:
-    if not FORECAST_CSV.is_file():
-        raise FileNotFoundError(f"Arquivo nao encontrado: {FORECAST_CSV}")
-    df = pd.read_csv(FORECAST_CSV)
+    if not FORECAST_ROOT.is_dir():
+        raise FileNotFoundError(f"Diretório não encontrado: {FORECAST_ROOT}")
+    version_dirs = [p for p in FORECAST_ROOT.iterdir() if p.is_dir() and re.fullmatch(r"v\d+", p.name, re.IGNORECASE)]
+    if not version_dirs:
+        raise FileNotFoundError(f"Nenhuma versão vN encontrada em {FORECAST_ROOT}")
+    latest_dir = max(version_dirs, key=lambda p: _version_key(p.name))
+    forecast_csv = latest_dir / "sinistralidade_forecast_completo.csv"
+    if not forecast_csv.is_file():
+        raise FileNotFoundError(f"Arquivo nao encontrado: {forecast_csv}")
+    df = pd.read_csv(forecast_csv)
     if "DATA" not in df.columns:
         raise ValueError("CSV de forecast sem coluna DATA")
     df["DATA"] = pd.to_datetime(df["DATA"], errors="coerce")
     return df.dropna(subset=["DATA"]).sort_values("DATA").reset_index(drop=True)
+
+
+def _version_key(name: str) -> int:
+    m = re.search(r"v(\d+)", str(name), flags=re.IGNORECASE)
+    return int(m.group(1)) if m else -1
+
+
+def list_predict_versions() -> list[str]:
+    if not PREDICT_ROOT.is_dir():
+        return []
+    versions = [p.name for p in PREDICT_ROOT.iterdir() if p.is_dir() and re.fullmatch(r"v\d+", p.name, re.IGNORECASE)]
+    return sorted(versions, key=_version_key, reverse=True)
+
+
+@st.cache_data(show_spinner=False)
+def latest_local_model_path() -> Path | None:
+    versions = list_predict_versions()
+    for ver in versions:
+        models_dir = PREDICT_ROOT / ver / "models"
+        if not models_dir.is_dir():
+            continue
+        files = sorted(models_dir.glob("model_*.pkl"))
+        if files:
+            return files[0]
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def load_features_catalog(version_label: str) -> dict[str, Any]:
+    path = PREDICT_ROOT / version_label / "catalogo_features_intervencao.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"Arquivo não encontrado: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if "grupos" not in payload:
+        raise ValueError(f"Catálogo inválido em {path}: campo 'grupos' ausente")
+    return payload
+
+
+def _run_predict_features(
+    *,
+    version_label: str,
+    feature: str,
+    delta_pct: float,
+    modo_idade: str,
+) -> tuple[bool, str]:
+    cmd = [
+        sys.executable,
+        str(ROOT_DIR / "pipelines" / "elgin" / "predict-features-mensal.py"),
+        "--versao",
+        version_label,
+        "--skip-mlflow",
+        "--feature",
+        feature,
+        "--delta-pct",
+        str(delta_pct),
+        "--modo-idade",
+        modo_idade,
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(ROOT_DIR),
+        text=True,
+        capture_output=True,
+    )
+    output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+    return proc.returncode == 0, output.strip()
+
+
+@st.cache_data(show_spinner=False)
+def load_kpi_mes_atual() -> dict[str, Any]:
+    if not RAW_PANEL_PARQUET.is_file():
+        raise FileNotFoundError(f"Arquivo não encontrado: {RAW_PANEL_PARQUET}")
+    cols = ["competencia", "valor_faturamento", "valor_sinistro_ajustado", "sinistralidade_final"]
+    df = pd.read_parquet(RAW_PANEL_PARQUET, columns=cols)
+    if "competencia" not in df.columns:
+        raise ValueError("Base raw sem coluna competencia")
+    comp = pd.to_datetime(df["competencia"], errors="coerce")
+    if comp.isna().all():
+        comp = pd.to_datetime(df["competencia"].astype(str), errors="coerce")
+    comp_ref = comp.max().to_period("M")
+    mask = comp.dt.to_period("M") == comp_ref
+    d = df.loc[mask].copy()
+    fat = pd.to_numeric(d["valor_faturamento"], errors="coerce").fillna(0.0)
+    sin_adj = pd.to_numeric(d["valor_sinistro_ajustado"], errors="coerce").fillna(0.0)
+    denom = float(fat.sum())
+    if denom > 0 and not sin_adj.isna().all():
+        sin_mes_ajust = float(sin_adj.sum() / denom)
+    else:
+        sin_final = pd.to_numeric(d["sinistralidade_final"], errors="coerce").fillna(0.0)
+        sin_mes_ajust = float((sin_final * fat).sum() / denom) if denom > 0 else float("nan")
+    return {
+        "competencia_referencia": str(comp_ref),
+        "sinistralidade_real_mes": sin_mes_ajust,
+        "sinistralidade_ajustada_mes": sin_mes_ajust,
+        "n_vidas_mes": int(len(d)),
+        "faturamento_mes": denom,
+    }
+
+
+def load_latest_what_if_result(version_label: str) -> dict[str, Any] | None:
+    path = PREDICT_ROOT / version_label / "what_if_mensal" / "resultado_what_if.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def render_calibracao_mes_section(
+    *,
+    kpi_mes: dict[str, Any] | None,
+    baseline_predito: float | None,
+) -> None:
+    if not kpi_mes:
+        return
+    real_mes = float(kpi_mes.get("sinistralidade_real_mes", float("nan")))
+    if np.isnan(real_mes):
+        return
+
+    st.markdown("### Calibração do mês")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Competência", str(kpi_mes.get("competencia_referencia", "-")))
+    c2.metric(
+        "Sinistralidade ajustada (mês)",
+        f"{real_mes:.6f}",
+        help="Mesmo KPI da faixa superior: sinistros ajustados ÷ faturamento do mês.",
+    )
+
+    if baseline_predito is None or np.isnan(float(baseline_predito)):
+        c3.metric("Baseline predito (modelo)", "-")
+        c4.metric("Gap calibração", "-")
+        st.caption("Execute uma simulação para atualizar o baseline predito do mês.")
+        return
+
+    pred_mes = float(baseline_predito)
+    gap_abs = pred_mes - real_mes
+    gap_rel = (gap_abs / real_mes * 100.0) if real_mes != 0 else float("nan")
+    c3.metric("Baseline predito (modelo)", f"{pred_mes:.6f}")
+    c4.metric("Gap calibração", f"{gap_rel:+.2f}%")
+    st.caption(f"Gap absoluto (predito - real): {gap_abs:+.6f}")
 
 
 def _counts_from_percentages(percentages: dict[str, float], total: int) -> dict[str, int]:
@@ -254,8 +435,10 @@ def _prepare_input_for_two_stage_model(model: Any, raw_df: pd.DataFrame) -> pd.D
 
 def _maybe_predict_payloads(unique_payload_df: pd.DataFrame) -> tuple[pd.Series | None, str]:
     model_path = (os.getenv("STREAMLIT_MODEL_PATH") or "").strip()
-    if not model_path and DEFAULT_MODEL_PATH.is_file():
-        model_path = str(DEFAULT_MODEL_PATH)
+    if not model_path:
+        latest_local = latest_local_model_path()
+        if latest_local is not None and latest_local.is_file():
+            model_path = str(latest_local)
     if not model_path:
         return None, "Modo estimativa: modelo nao encontrado (defina STREAMLIT_MODEL_PATH)."
 
@@ -469,210 +652,221 @@ def _show_profile_modal(profile: dict[str, Any], highlight_features: list[str]) 
         st.info("Sem outras features para exibir.")
 
 
-def _render_prediction_results() -> None:
-    result_df = st.session_state.get("prediction_result_df")
-    summary = st.session_state.get("prediction_summary")
-    mode_msg = st.session_state.get("prediction_mode_msg")
-
-    if result_df is None or summary is None:
-        st.session_state["prediction_step"] = "selection"
-        st.rerun()
-
-    st.subheader("Etapa 2 de 2: Resultado da inferência")
-    st.caption("Resultado da simulação com base nos perfis e proporções selecionados.")
-
-    if st.button("Voltar para seleção de perfis"):
-        st.session_state["prediction_step"] = "selection"
-        st.rerun()
-
-    st.success(mode_msg)
-    total_users = int(summary["volume_vidas_simuladas"])
-    weighted_pred = float(summary["sinistralidade_media_ponderada"])
-
-    label, color = _sinistralidade_status(weighted_pred)
-    num_color = "#c62828" if weighted_pred < 0 else color
-    st.markdown(
-        f"""
-<div style="text-align:center;padding:1rem 0;">
-  <div style="font-size:2.4rem;font-weight:700;color:{num_color};">{weighted_pred:.2f}%</div>
-  <div style="font-size:1.15rem;font-weight:600;color:{color};margin-top:0.35rem;">{label}</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    out = result_df.copy()
-    out["peso_real_%"] = 100.0 * out["qtd_usuarios"] / total_users
-    out["peso_real_%"] = out["peso_real_%"].round(2)
-    out["sinistralidade_historica_%"] = out["sinistralidade_historica_perfil"].round(2).astype(str) + "%"
-    out["sinistralidade_prevista_%"] = out["sinistralidade_prevista_perfil"].round(2).astype(str) + "%"
-    st.dataframe(
-        out[
-            [
-                "profile_id",
-                "plano",
-                "peso_real_%",
-                "sinistralidade_historica_%",
-                "sinistralidade_prevista_%",
-            ]
-        ],
-        width="stretch",
-        hide_index=True,
-    )
-
-    chart_df = out.sort_values("sinistralidade_prevista_perfil", ascending=False).head(15)
-    st.bar_chart(
-        chart_df.set_index("profile_id")["sinistralidade_prevista_perfil"],
-        width="stretch",
-    )
-
-
 def render_prediction_tab() -> None:
-    st.header("Predição agregada")
-    st.caption("Etapa 1: selecione perfis do catalogo e defina a proporcao de cada um na carteira simulada.")
+    st.header("Predição por features (What-If)")
+    st.caption("Selecione grupo e feature para executar intervenção no pipeline real de predição.")
+    kpi: dict[str, Any] | None = None
+    try:
+        kpi = load_kpi_mes_atual()
 
-    profiles = load_profiles()
-    feature_impact_df = load_feature_impact_csv()
-    st.session_state.setdefault("prediction_step", "selection")
-    selected_map, percentage_map = _get_prediction_selection_state()
+        def _fmt_num(v: Any, nd: int = 6) -> str:
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return "-"
+            if np.isnan(x):
+                return "-"
+            return f"{x:.{nd}f}"
 
-    if st.session_state["prediction_step"] == "results":
-        _render_prediction_results()
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Competência de referência", kpi["competencia_referencia"])
+        k2.metric(
+            "Sinistralidade ajustada (mês)",
+            _fmt_num(kpi.get("sinistralidade_ajustada_mes")),
+            help="Total de sinistro ajustado do mês ÷ faturamento do mês (carteira). Usada na calibração com o modelo.",
+        )
+        k3.metric("Vidas no mês", f"{int(kpi['n_vidas_mes']):,}")
+        k4.metric("Faturamento do mês", f"{float(kpi['faturamento_mes']):,.2f}")
+        st.caption(
+            "**Sinistralidade ajustada:** sinistros ajustados do mês ÷ faturamento do mês (carteira). "
+            "Usada para comparar com o baseline predito na secção de calibração."
+        )
+    except Exception as e:
+        st.warning(f"Não foi possível carregar KPI mensal da base raw: {e}")
+
+    versions = list_predict_versions()
+    if not versions:
+        st.error("Nenhuma pasta vN encontrada em data/processed/elgin/predict.")
         return
 
-    total_pages = 5
-    st.session_state.setdefault("prediction_catalog_page", 1)
-    selected_page = int(st.session_state["prediction_catalog_page"])
+    # UI sem escolha manual de versão: usa sempre a versão mais recente.
+    version_label = versions[0]
+    ultimo_resultado = load_latest_what_if_result(version_label)
+    baseline_inicial = None
+    if ultimo_resultado and "sinistralidade_antes" in ultimo_resultado:
+        baseline_inicial = float(ultimo_resultado.get("sinistralidade_antes", float("nan")))
+    render_calibracao_mes_section(kpi_mes=kpi, baseline_predito=baseline_inicial)
 
-    st.caption("Página de perfis")
-    nav_cols = st.columns([1.6, 0.7, 0.7, 0.7, 0.7, 0.7, 1.6])
-    with nav_cols[0]:
-        if st.button("◀ Anterior", key="pred_page_prev", disabled=selected_page <= 1):
-            st.session_state["prediction_catalog_page"] = max(1, selected_page - 1)
-            st.rerun()
-    for i in range(1, total_pages + 1):
-        with nav_cols[i]:
-            if st.button(
-                str(i),
-                key=f"pred_page_{i}",
-                type="primary" if selected_page == i else "secondary",
-            ):
-                st.session_state["prediction_catalog_page"] = i
-                st.rerun()
-    with nav_cols[6]:
-        if st.button("Próximo ▶", key="pred_page_next", disabled=selected_page >= total_pages):
-            st.session_state["prediction_catalog_page"] = min(total_pages, selected_page + 1)
-            st.rerun()
+    try:
+        catalog = load_features_catalog(version_label)
+    except Exception as e:
+        st.error(f"Falha ao carregar catálogo de features da versão {version_label}: {e}")
+        return
 
-    selected_page = int(st.session_state["prediction_catalog_page"])
+    grupos = catalog.get("grupos", [])
+    if not grupos:
+        st.warning("Catálogo sem grupos/features disponíveis.")
+        return
 
-    page_size = 20
-    start_idx = (selected_page - 1) * page_size
-    end_idx = start_idx + page_size
-    profiles_page = profiles.iloc[start_idx:end_idx].copy()
+    grupo_nomes = [str(g.get("grupo", "sem_grupo")) for g in grupos]
+    grupo_sel = st.selectbox("Grupo de características", options=grupo_nomes)
+    grupo_obj = next((g for g in grupos if str(g.get("grupo")) == grupo_sel), grupos[0])
 
-    st.write(f"Exibindo perfis **{start_idx + 1} a {min(end_idx, len(profiles))}** do catálogo top 100.")
+    features = grupo_obj.get("features", [])
+    if not features:
+        st.warning("Grupo sem features disponíveis.")
+        return
 
-    card_cols = st.columns(4)
-    for idx, (_, row) in enumerate(profiles_page.iterrows()):
-        profile = row.to_dict()
-        payload = dict(profile["payload"])
-        pid = str(profile["profile_id"])
-        highlight_features = _top_card_features(feature_impact_df, payload)
-        current_selected = bool(selected_map.get(pid, False))
-        current_pct = float(percentage_map.get(pid, 0.0))
+    feat_labels = [
+        f"{_format_feature_name(str(f.get('feature', '')))}  | elegíveis(+): {f.get('n_elegiveis_delta_positivo', 0):,}"
+        for f in features
+    ]
+    feat_idx = st.selectbox("Feature para intervenção", options=list(range(len(features))), format_func=lambda i: feat_labels[i])
+    feat = features[feat_idx]
+    feat_name = str(feat.get("feature"))
 
-        front_items = [
-            ("Idade", _format_feature_value(payload, "idade")),
-            ("Sexo", _format_feature_value(payload, "sexo")),
-        ]
-        front_items.extend(
-            [(_format_feature_name(feature), _format_feature_value(payload, feature)) for feature in highlight_features]
+    delta_pct = st.slider("Delta da intervenção (%)", min_value=-90.0, max_value=200.0, value=20.0, step=1.0)
+    modo_idade = "simples"
+    if feat_name == "idade":
+        modo_idade = st.radio(
+            "Modo de idade",
+            options=["simples", "correlacionado"],
+            format_func=lambda k: MODO_IDADE_LABEL.get(str(k), str(k)),
+            horizontal=True,
+            help=MODO_IDADE_RADIO_HELP,
         )
 
-        with card_cols[idx % 4]:
-            with st.container(border=True):
-                st.markdown(f"#### {pid}")
-                st.caption(f"Plano: {profile['plano']}")
-                for label, value in front_items:
-                    st.write(f"**{label}:** {value}")
-
-                selected = st.checkbox("Selecionar", value=current_selected, key=f"ui_selected_{pid}")
-                selected_map[pid] = bool(selected)
-                if selected:
-                    percentage_map[pid] = float(
-                        st.number_input(
-                            "Proporcao (%)",
-                            min_value=0.0,
-                            max_value=100.0,
-                            value=current_pct,
-                            step=0.1,
-                            key=f"ui_pct_{pid}",
-                        )
-                    )
-                else:
-                    percentage_map[pid] = 0.0
-                    st.number_input(
-                        "Proporcao (%)",
-                        min_value=0.0,
-                        max_value=100.0,
-                        value=0.0,
-                        step=0.1,
-                        key=f"ui_pct_{pid}",
-                        disabled=True,
-                    )
-
-                if st.button("Ver detalhes", key=f"detail_{pid}"):
-                    _show_profile_modal(profile, highlight_features)
-
-    selected_profiles = [
-        pid
-        for pid in profiles["profile_id"].tolist()
-        if bool(selected_map.get(pid, False))
-    ]
-    percentages = {pid: float(percentage_map.get(pid, 0.0)) for pid in selected_profiles}
-    total_pct = float(sum(percentages.values()))
-
-    st.divider()
-    st.subheader("Resumo da seleção")
-    if st.button("Limpar seleção", key="clear_prediction_selection"):
-        selected_map.clear()
-        percentage_map.clear()
-        for pid in profiles["profile_id"].tolist():
-            st.session_state.pop(f"ui_selected_{pid}", None)
-            st.session_state.pop(f"ui_pct_{pid}", None)
+    if st.button("Executar inferência what-if", type="primary"):
+        ok, output = _run_predict_features(
+            version_label=version_label,
+            feature=feat_name,
+            delta_pct=float(delta_pct),
+            modo_idade=modo_idade,
+        )
+        st.session_state["pred_features_last_output"] = output
+        st.session_state["pred_features_last_ok"] = ok
+        st.session_state["pred_features_last_version"] = version_label
         st.rerun()
 
-    st.write(f"Perfis selecionados: **{len(selected_profiles)}**")
-    st.write(f"Soma informada: **{total_pct:.2f}%** (normalizada internamente para 100%).")
+    if "pred_features_last_ok" in st.session_state:
+        ok = bool(st.session_state.get("pred_features_last_ok"))
+        out = str(st.session_state.get("pred_features_last_output", ""))
+        last_ver = str(st.session_state.get("pred_features_last_version", version_label))
+        if ok:
+            st.success("Inferência executada com sucesso.")
+        else:
+            st.error("Falha ao executar inferência.")
 
-    if selected_profiles:
-        selection_df = profiles[profiles["profile_id"].isin(selected_profiles)][["profile_id", "plano"]].copy()
-        selection_df["proporcao_%"] = selection_df["profile_id"].map(percentages).fillna(0.0)
-        selection_df["proporcao_%"] = selection_df["proporcao_%"].round(2)
-        st.dataframe(selection_df, width="stretch", hide_index=True)
-    else:
-        st.info("Selecione ao menos um perfil para habilitar a simulação.")
+        what_if_dir = PREDICT_ROOT / last_ver / "what_if_mensal"
+        resultado_path = what_if_dir / "resultado_what_if.json"
+        relatorio_path = what_if_dir / "relatorio_intervencao.json"
+        resultado: dict[str, Any] = {}
+        relatorio: dict[str, Any] = {}
 
-    if st.button("Executar simulacao de inferencia", type="primary", disabled=not selected_profiles):
-        try:
-            result_df, mode_msg, summary = _simulate_cohort(profiles, percentages)
-        except Exception as e:
-            st.error(f"Falha ao simular carteira: {e}")
-            return
+        if resultado_path.is_file():
+            try:
+                resultado = json.loads(resultado_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                st.warning(f"Não foi possível ler resultado_what_if.json: {e}")
+        if relatorio_path.is_file():
+            try:
+                relatorio = json.loads(relatorio_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                st.warning(f"Não foi possível ler relatorio_intervencao.json: {e}")
 
-        st.session_state["prediction_result_df"] = result_df
-        st.session_state["prediction_mode_msg"] = mode_msg
-        st.session_state["prediction_summary"] = summary
-        st.session_state["prediction_step"] = "results"
-        st.rerun()
+        if resultado:
+            st.subheader("Resultado da Simulação")
+            rr1, rr2, rr3, rr4 = st.columns(4)
+            rr1.metric("Sinistralidade antes", f"{float(resultado.get('sinistralidade_antes', 0.0)):.6f}")
+            rr2.metric("Sinistralidade depois", f"{float(resultado.get('sinistralidade_depois', 0.0)):.6f}")
+            rr3.metric("Delta absoluto", f"{float(resultado.get('delta_absoluto', 0.0)):+.8f}")
+            rr4.metric("Delta relativo", f"{float(resultado.get('delta_relativo_pct', 0.0)):+.4f}%")
+
+            ee1, ee2, ee3 = st.columns(3)
+            ee1.metric("Usuários afetados", f"{int(resultado.get('n_individuos_afetados', 0)):,}")
+            ee2.metric("Usuários não elegíveis", f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}")
+            ee3.metric("Versão do modelo", str(resultado.get("versao_modelo", last_ver)))
+
+            st.markdown("**Explicabilidade da intervenção**")
+            intervs = resultado.get("intervencoes", [])
+            if isinstance(intervs, list) and intervs:
+                exp_df = pd.DataFrame(intervs)
+                if not exp_df.empty:
+                    if "feature" in exp_df.columns:
+                        exp_df["feature_label"] = exp_df["feature"].astype(str).map(_format_feature_name)
+                    show_cols = [c for c in ["feature_label", "feature", "delta_pct"] if c in exp_df.columns]
+                    st.dataframe(
+                        exp_df[show_cols].rename(
+                            columns={
+                                "feature_label": "Feature",
+                                "feature": "Coluna técnica",
+                                "delta_pct": "Delta (%)",
+                            }
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
+            if feat_name == "idade":
+                st.caption(
+                    f"Modo de idade aplicado: **{MODO_IDADE_LABEL.get(modo_idade, modo_idade)}** (`{modo_idade}`)"
+                )
+
+        if relatorio:
+            st.markdown("**Detalhamento de elegibilidade**")
+            interv = relatorio.get("intervencoes", [])
+            if isinstance(interv, list) and interv:
+                rel_df = pd.DataFrame(interv)
+                if not rel_df.empty:
+                    if "feature" in rel_df.columns:
+                        rel_df["feature_label"] = rel_df["feature"].astype(str).map(_format_feature_name)
+                    cols_map = {
+                        "feature_label": "Feature",
+                        "feature": "Coluna técnica",
+                        "delta_pct": "Delta (%)",
+                        "n_elegiveis": "Elegíveis",
+                        "n_nao_elegiveis": "Não elegíveis",
+                    }
+                    keep_cols = [
+                        c
+                        for c in [
+                            "feature_label",
+                            "feature",
+                            "delta_pct",
+                            "n_elegiveis",
+                            "n_nao_elegiveis",
+                        ]
+                        if c in rel_df.columns
+                    ]
+                    st.dataframe(rel_df[keep_cols].rename(columns=cols_map), width="stretch", hide_index=True)
+            pct_base = relatorio.get("pct_base_afetada")
+            if pct_base is not None:
+                st.caption(f"Percentual da base afetada: {float(pct_base):.2f}%")
+
+        with st.expander("Detalhes técnicos da execução", expanded=not ok):
+            st.code(out or "(sem saída)")
 
 
 def render_feature_impact_tab() -> None:
     st.header("Correlação")
-    st.caption("Analise estatica com base no CSV consolidado de correlacao Spearman.")
-    df = load_feature_impact_csv()
+    st.caption("Análise de correlação Spearman por competência (mês).")
+
+    try:
+        ver_dir, comps = list_feature_impact_competencias()
+    except Exception:
+        ver_dir, comps = (Path("."), [])
+
+    if comps:
+        comp_default = comps[-1]
+        comp_sel = st.selectbox("Competência", options=comps, index=len(comps) - 1)
+        st.caption(f"Versão ativa: {ver_dir.name}")
+        df, comp_loaded = load_feature_impact_csv(comp_sel)
+    else:
+        df, comp_loaded = load_feature_impact_csv(None)
+        st.warning("Formato legado detectado: exibindo CSV único (sem separação por competência).")
+
     df = df.copy()
+    # Oculta variáveis quasi-leakage por padrão na UI de correlação.
+    df = df[~df["feature"].isin(QUASI_LEAKAGE_HIDE)].copy()
     df["feature_label"] = df["feature"].map(_format_feature_name)
 
     st.metric("Total de features", len(df))

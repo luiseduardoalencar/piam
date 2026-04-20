@@ -58,26 +58,52 @@ mlartifacts/
 data/**
 
 # Mantém somente os artefatos necessários para a aplicação Streamlit.
+# Ao gerar vN nova (predict / feature-impact / forecast), atualize os caminhos abaixo
+# para não voltar a versionar histórico inteiro no Git.
 !data/processed/
 !data/processed/elgin/
-
 !data/processed/elgin/feature-impact/
-!data/processed/elgin/feature-impact/v3/
-!data/processed/elgin/feature-impact/v3/feature_correlation_sinistralidade.csv
-
 !data/processed/elgin/forecast/
-!data/processed/elgin/forecast/v1/
-!data/processed/elgin/forecast/v1/sinistralidade_forecast_completo.csv
-
 !data/processed/elgin/predict/
-!data/processed/elgin/predict/v*/
-!data/processed/elgin/predict/v*/catalogo_perfis_top100.json
-!data/processed/elgin/predict/v12/models/
-!data/processed/elgin/predict/v12/models/model_MASTER_EMPRESARIAL.pkl
+
+# Correlação: ignora todas as pastas vN em feature-impact, exceto v5 (CSV mensal).
+data/processed/elgin/feature-impact/*
+!data/processed/elgin/feature-impact/v5/
+data/processed/elgin/feature-impact/v5/*
+!data/processed/elgin/feature-impact/v5/*/
+data/processed/elgin/feature-impact/v5/*/*
+!data/processed/elgin/feature-impact/v5/*/*.csv
+
+# Previsão (forecast): só o CSV da versão publicada (ajuste v2 se mudar).
+data/processed/elgin/forecast/*
+!data/processed/elgin/forecast/v2/
+data/processed/elgin/forecast/v2/*
+!data/processed/elgin/forecast/v2/sinistralidade_forecast_completo.csv
+
+# Predição: só uma pasta vN (ajuste v20 ao publicar novo treino).
+data/processed/elgin/predict/*
+!data/processed/elgin/predict/v20/
+data/processed/elgin/predict/v20/*
+!data/processed/elgin/predict/v20/catalogo_features_intervencao.json
+!data/processed/elgin/predict/v20/models/
+data/processed/elgin/predict/v20/models/*
+!data/processed/elgin/predict/v20/models/*.pkl
+!data/processed/elgin/predict/v20/what_if_mensal/
+data/processed/elgin/predict/v20/what_if_mensal/*
+!data/processed/elgin/predict/v20/what_if_mensal/*.json
+!data/processed/elgin/predict/v20/what_if_mensal/*.csv
 
 # Mantém exemplos da pasta raw, se existirem.
 !data/raw/
 !data/raw/.gitkeep
 !data/raw/exemplo_receitas.csv
+
+# Painel analítico (parquet) — necessário para KPIs reais no Streamlit Cloud e pipelines locais
+!data/raw/elgin/
+!data/raw/elgin/base_analitica/
+!data/raw/elgin/base_analitica/painel_sinistralidade_v1.parquet
+
+# Ficheiros temporários locais (não enviar ao remoto)
+/tmp_interv.json
 
 mvp/

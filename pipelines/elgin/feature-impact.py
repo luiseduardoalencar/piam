@@ -103,9 +103,9 @@ COMPANY = "elgin"
 TRANSFORMED_PARQUET_PATH = (
     ROOT_DIR
     / "data"
-    / "processed"
+    / "raw"
     / COMPANY
-    / "base_analitica_transformada"
+    / "base_analitica"
     / "painel_sinistralidade_v1.parquet"
 )
 FEATURE_CATALOG_PATH = ROOT_DIR / "data" / "auxiliar" / COMPANY / "feature_catalog.csv"
@@ -167,7 +167,7 @@ N_MESES_COL = "n_meses_obs"
 # MLflow: por defeito não corre (testes locais só com CSVs). Para registar:
 #   FEATURE_IMPACT_MLFLOW=1 python pipelines/elgin/feature-impact.py
 # Ou pôr FORCE_MLFLOW = True.
-FORCE_MLFLOW = True
+FORCE_MLFLOW = False
 ENABLE_MLFLOW = FORCE_MLFLOW or os.environ.get("FEATURE_IMPACT_MLFLOW", "0").strip().lower() in (
     "1",
     "true",
@@ -965,303 +965,53 @@ def impact_segment(
 
 
 # =============================================================================
-# %% — Carga e preparação
+# %% — Cálculo mensal de correlação (artefato único por mês)
 # =============================================================================
 
 feature_catalog = load_feature_catalog()
 df_raw = pd.read_parquet(TRANSFORMED_PARQUET_PATH)
 print("Shape (painel):", df_raw.shape, "Fonte:", TRANSFORMED_PARQUET_PATH)
 
-n_rows_panel = len(df_raw)
-if AGGREGATE_BY_BENEFICIARIO:
-    df_raw = aggregate_panel_by_beneficiary(df_raw)
-    print(
-        f"Agregado por {BENEFICIARIO_COL}: {n_rows_panel} linhas -> {len(df_raw)} beneficiarios"
-    )
-
-eligible = catalog_eligible_names(feature_catalog)
-exclude_x = (
-    LEAKAGE_COLS
-    | QUASI_LEAKAGE_COLS
-    | {TARGET_COL, BENEFICIARIO_COL, TIME_COL, SEGMENT_COL, N_MESES_COL}
-)
-valid_features = [
-    f for f in eligible
-    if f in df_raw.columns and f not in exclude_x
-]
-
-df_raw[SEGMENT_COL] = normalize_plano(df_raw[SEGMENT_COL])
-segment_values      = sorted(df_raw[SEGMENT_COL].dropna().unique())
-print("Segmentos:", segment_values)
-print("Features preditivas:", len(valid_features), valid_features[:5], "...")
-print("Quasi-leakage excluídas do treino:", sorted(QUASI_LEAKAGE_COLS))
-print(
-    "Amostragem: KFold=%s | permutation=%s | SHAP=%s"
-    % (
-        "todas as linhas" if KFOLD_MAX_ROWS is None else f"max {KFOLD_MAX_ROWS}",
-        "todas as linhas" if PERM_IMPORTANCE_MAX_ROWS is None else f"max {PERM_IMPORTANCE_MAX_ROWS}",
-        "todas as linhas" if SHAP_MAX_ROWS is None else f"max {SHAP_MAX_ROWS}",
-    )
-)
-print(
-    "MLflow ao final:",
-    "SIM" if ENABLE_MLFLOW else "NAO (defina FEATURE_IMPACT_MLFLOW=1 ou FORCE_MLFLOW)",
-)
-
 eligible_for_corr = [
     f for f in catalog_eligible_names(feature_catalog)
     if f in df_raw.columns
     and f not in LEAKAGE_COLS
-    and f not in (BENEFICIARIO_COL, TIME_COL)
-    # quasi-leakage entra na correlação para diagnóstico, mas marcado separadamente
+    and f not in (BENEFICIARIO_COL, TIME_COL, SEGMENT_COL)
 ]
 
-feature_to_category_full = feature_catalog.set_index("feature_name")["category"].astype(str).to_dict()
-bases_sorted = sorted(feature_to_category_full.keys(), key=len, reverse=True)
+if TIME_COL not in df_raw.columns:
+    raise ValueError(f"Coluna temporal obrigatória ausente: {TIME_COL}")
 
-valid_categories = sorted({
-    str(c)
-    for c in feature_catalog.loc[
-        feature_catalog["feature_name"].isin(valid_features), "category"
-    ].unique()
-})
+comp = pd.to_datetime(df_raw[TIME_COL], errors="coerce")
+df_raw = df_raw.loc[comp.notna()].copy()
+df_raw["_comp_period"] = comp.loc[comp.notna()].dt.to_period("M")
+meses = sorted(df_raw["_comp_period"].dropna().unique())
 
-# Features prospectivas disponíveis neste dataset
-prospective_in_data = [
-    f for f in PROSPECTIVE_FEATURES
-    if f in df_raw.columns and f in valid_features
-]
-
-kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
 ver, OUTPUT_DIR = next_version_dir(OUTPUT_FEATURE_IMPACT_ROOT)
 print(f"Versão de saída: {ver} -> {OUTPUT_DIR}")
+print(f"Competências detectadas: {len(meses)}")
 
+for mes in meses:
+    mes_slug = str(mes)
+    mes_dir = OUTPUT_DIR / mes_slug
+    mes_dir.mkdir(parents=True, exist_ok=True)
 
-# =============================================================================
-# %% — Loop principal por segmento
-# =============================================================================
+    d = df_raw.loc[df_raw["_comp_period"] == mes].copy()
+    y = pd.to_numeric(d[TARGET_COL], errors="coerce")
+    rows: list[dict[str, Any]] = []
+    for col in eligible_for_corr:
+        s = _spearman_vs_target(d[col], y)
+        if s is None:
+            continue
+        rows.append({"feature": col, "spearman": float(s)})
 
-all_corr_meta:  list[dict[str, Any]] = []
-all_impact:     list[dict[str, Any]] = []
-all_quasi_leak: list[dict[str, Any]] = []
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["abs_spearman"] = out["spearman"].abs()
+        out = out.sort_values("abs_spearman", ascending=False).drop(columns=["abs_spearman"])
+    csv_path = mes_dir / MLFLOW_ARTIFACT_CSV_FILENAME
+    out.to_csv(csv_path, index=False)
+    print(f"[OK] {mes_slug}: {len(out):,} features -> {csv_path}")
 
-for seg in segment_values:
-    segment_slug = plano_slug(seg)
-    df_seg = df_raw[df_raw[SEGMENT_COL] == seg].reset_index(drop=True)
-
-    if len(df_seg) < N_SPLITS * 2:
-        print(f"[SKIP] {seg}: poucas linhas ({len(df_seg)})")
-        continue
-
-    print(f"\n{'='*60}")
-    print(f"Segmento: {seg}  ({len(df_seg)} linhas)")
-    print(f"{'='*60}")
-
-    # Correlação
-    corr_cols = cols_numeric_for_corr(
-        df_seg, [c for c in eligible_for_corr if c in df_seg.columns]
-    )
-    cmeta = correlation_analysis_segment(df_seg, corr_cols, OUTPUT_DIR, segment_slug)
-    all_corr_meta.append(cmeta)
-
-    # Diagnóstico quasi-leakage
-    ql = quasi_leakage_analysis(df_seg, OUTPUT_DIR, segment_slug)
-    if ql:
-        all_quasi_leak.append(ql)
-
-    # Impacto (retro + prospectivo)
-    imp = impact_segment(
-        df_seg,
-        feature_catalog,
-        valid_features,
-        valid_categories,
-        feature_to_category_full,
-        bases_sorted,
-        OUTPUT_DIR,
-        segment_slug,
-        kf,
-        prospective_features=prospective_in_data,
-    )
-    all_impact.append(imp)
-
-
-# =============================================================================
-# %% — Outputs consolidados (multi-segmento, prontos para plataforma)
-# =============================================================================
-
-# summary R² global com IC
-summary_rows = []
-for imp in all_impact:
-    ci = imp.get("r2_global_ci") or (None, None)
-    summary_rows.append({
-        "segment":       imp["segment_slug"],
-        "r2_global":     imp["r2_global"],
-        "r2_global_std": imp["r2_global_std"],
-        "r2_ci_lower":   ci[0],
-        "r2_ci_upper":   ci[1],
-    })
-summary_path = OUTPUT_DIR / "summary_r2_global.csv"
-pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
-
-# Correlação long empilhada (todos os segmentos num único CSV)
-corr_long_all_path = OUTPUT_DIR / "corr_long_all_segments.csv"
-_corr_long_parts = []
-for cm in all_corr_meta:
-    seg = cm.get("segment", "")
-    p   = OUTPUT_DIR / f"corr_long_{seg}.csv"
-    if p.is_file():
-        _corr_long_parts.append(pd.read_csv(p))
-if _corr_long_parts:
-    pd.concat(_corr_long_parts, ignore_index=True).to_csv(corr_long_all_path, index=False)
-
-# R² isolado empilhado
-r2_iso_all_path = OUTPUT_DIR / "r2_isolado_all_segments.csv"
-_iso_parts = []
-for imp in all_impact:
-    p = imp["paths"].get("isolated")
-    if p and Path(p).is_file():
-        _iso_parts.append(pd.read_csv(p))
-if _iso_parts:
-    pd.concat(_iso_parts, ignore_index=True).to_csv(r2_iso_all_path, index=False)
-
-# Compare isolado × global empilhado
-compare_all_path = OUTPUT_DIR / "compare_all_segments.csv"
-_cmp_parts = []
-for imp in all_impact:
-    p = imp["paths"].get("compare")
-    if p and Path(p).is_file():
-        _cmp_parts.append(pd.read_csv(p))
-if _cmp_parts:
-    pd.concat(_cmp_parts, ignore_index=True).to_csv(compare_all_path, index=False)
-
-# High-corr pairs empilhado
-hcp_all_path = OUTPUT_DIR / "high_corr_pairs_all_segments.csv"
-_hcp_parts = []
-for cm in all_corr_meta:
-    seg = cm.get("segment", "")
-    p   = OUTPUT_DIR / f"high_corr_pairs_{seg}.csv"
-    if p.is_file():
-        _hcp_parts.append(pd.read_csv(p))
-if _hcp_parts:
-    pd.concat(_hcp_parts, ignore_index=True).to_csv(hcp_all_path, index=False)
-
-# SHAP summary empilhado
-shap_all_path = OUTPUT_DIR / "shap_summary_all_segments.csv"
-_shap_parts = []
-for imp in all_impact:
-    p = imp["paths"].get("shap_summary")
-    if p and Path(p).is_file():
-        _shap_parts.append(pd.read_csv(p))
-if _shap_parts:
-    pd.concat(_shap_parts, ignore_index=True).to_csv(shap_all_path, index=False)
-
-# Metadata da run
-meta_path = OUTPUT_DIR / "run_metadata.json"
-with open(meta_path, "w", encoding="utf-8") as f:
-    json.dump({
-        "version": ver,
-        "parquet": str(TRANSFORMED_PARQUET_PATH),
-        "aggregate_by_beneficiary": AGGREGATE_BY_BENEFICIARIO,
-        "n_rows_panel": n_rows_panel,
-        "n_rows_after_agg": len(df_raw) if AGGREGATE_BY_BENEFICIARIO else n_rows_panel,
-        "n_segments": len(all_impact),
-        "n_valid_features": len(valid_features),
-        "quasi_leakage_cols": sorted(QUASI_LEAKAGE_COLS),
-        "corr_high_threshold": CORR_HIGH_THRESHOLD,
-        "perm_importance_max_rows": PERM_IMPORTANCE_MAX_ROWS,
-        "perm_n_repeats": PERM_N_REPEATS,
-        "kfold_max_rows": KFOLD_MAX_ROWS,
-        "shap_max_rows": SHAP_MAX_ROWS,
-        "pdp_top_n": PDP_TOP_N,
-        "has_shap": HAS_SHAP,
-    }, f, indent=2)
-
-print(f"\nOutputs consolidados salvos em {OUTPUT_DIR}")
-
-mlflow_artifact_csv_path = write_feature_correlation_sinistralidade_csv(
-    df_raw, valid_features, OUTPUT_DIR
-)
-if mlflow_artifact_csv_path is not None:
-    print(
-        f"CSV Spearman vs {TARGET_COL} para MLflow/BI: {mlflow_artifact_csv_path.name}"
-    )
-plot_top_path: Path | None = None
-if mlflow_artifact_csv_path is not None:
-    plot_top_path = plot_feature_impact_top_n(
-        mlflow_artifact_csv_path,
-        OUTPUT_DIR / FEATURE_IMPACT_PLOT_FILENAME,
-        n=FEATURE_IMPACT_TOP_N_PLOT,
-    )
-if plot_top_path is not None:
-    print(f"Gráfico local top-{FEATURE_IMPACT_TOP_N_PLOT}: {plot_top_path.name}")
-
-
-# =============================================================================
-# %% — MLflow (opcional: artefato = feature_correlation_sinistralidade.csv; params/métricas completos)
-# =============================================================================
-
-def _fmt_opt_int(v: int | None) -> str:
-    return "full" if v is None else str(v)
-
-
-if ENABLE_MLFLOW:
-    if mlflow_artifact_csv_path is None or not mlflow_artifact_csv_path.is_file():
-        print(
-            "\n[MLflow] CSV Spearman vs sinistralidade não gerado — registo ignorado."
-        )
-    else:
-        _ = configurar_mlflow(EXPERIMENT_NAME)
-        run_name = f"elgin__{ver}"
-
-        params_log: dict[str, str] = {
-            "data_path": str(TRANSFORMED_PARQUET_PATH),
-            "output_dir": str(OUTPUT_DIR),
-            "version": ver,
-            "aggregate_by_beneficiary": str(AGGREGATE_BY_BENEFICIARIO),
-            "n_splits": str(N_SPLITS),
-            "random_state": str(RANDOM_STATE),
-            "perm_importance_max_rows": _fmt_opt_int(PERM_IMPORTANCE_MAX_ROWS),
-            "perm_n_repeats": str(PERM_N_REPEATS),
-            "kfold_max_rows": _fmt_opt_int(KFOLD_MAX_ROWS),
-            "shap_max_rows": _fmt_opt_int(SHAP_MAX_ROWS),
-            "corr_high_threshold": str(CORR_HIGH_THRESHOLD),
-            "quasi_leakage_cols": "|".join(sorted(QUASI_LEAKAGE_COLS)),
-            "mlflow_artifact_csv": MLFLOW_ARTIFACT_CSV_FILENAME,
-        }
-
-        metrics_log: dict[str, float] = {}
-        for imp in all_impact:
-            slug = imp["segment_slug"]
-            if imp.get("r2_global") is not None:
-                metrics_log[f"r2_global_{slug}"] = float(imp["r2_global"])
-            if imp.get("r2_global_std") is not None:
-                metrics_log[f"r2_global_std_{slug}"] = float(imp["r2_global_std"])
-
-        for cm in all_corr_meta:
-            seg = cm.get("segment", "")
-            m = cm.get("metrics", {})
-            if "max_abs_spearman_vs_target" in m:
-                metrics_log[f"max_abs_spearman_{seg}"] = float(m["max_abs_spearman_vs_target"])
-            if "n_high_corr_pairs" in m:
-                metrics_log[f"n_high_corr_pairs_{seg}"] = float(m["n_high_corr_pairs"])
-
-        with mlflow.start_run(run_name=run_name):
-            for k, v in params_log.items():
-                mlflow.log_param(k, v)
-            for k, v in metrics_log.items():
-                mlflow.log_metric(k, v)
-            mlflow.log_artifact(
-                str(mlflow_artifact_csv_path),
-                artifact_path="feature_impact",
-            )
-
-        print(
-            f"\n[OK] MLflow run '{run_name}' | artefato: {MLFLOW_ARTIFACT_CSV_FILENAME} "
-            f"| params/metrics registados (PNG não enviado)"
-        )
-else:
-    print(
-        "\n[MLflow] Ignorado. Para registar (CSV + params/métricas): "
-        "FEATURE_IMPACT_MLFLOW=1 ou FORCE_MLFLOW=True."
-    )
+print(f"\nConcluído. Artefatos mensais em: {OUTPUT_DIR}")
 # %%

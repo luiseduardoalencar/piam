@@ -1,26 +1,25 @@
 """
-Inferência ELGIN via **último modelo registado** no MLflow (pyfunc).
+Inferência ELGIN via modelo registado no MLflow (pyfunc).
 
-**Não regista nada no MLflow:** usa ``configurar_mlflow(..., preparar_experimento=False)`` —
-só URI/credenciais para ler o Registry e artefatos; não cria experimento nem run.
+Toda a descoberta de runs, versões e caminhos de artefatos faz-se através da API do
+MLflow (``MlflowClient`` + listagens); não há ``run_id`` nem caminhos de artefatos
+fixos no código. Nomes de modelo e de experimentos vêm de variáveis de ambiente
+(ver ``.env`` / ``config/mlflow_config.py``) ou de argumentos CLI.
 
-- Carrega ``models:/<nome>/latest`` (pyfunc), escolhe **aleatoriamente** um perfil entre os 100
-  do ``catalogo_perfis_top100.json`` do run desse modelo (``runs:/...``, leitura).
-- Modo predefinido: lista também artefatos do run de predição e o último run de
-  ``piam-elgin-feature-impact`` (só leitura / preview em memória).
-- ``--somente-inferencia``: apenas carrega o modelo e executa a predição (sem listagens extra).
-- ``--carteira N`` (ex.: ``7``): ``N`` “utilizadores” com perfis **aleatórios** entre os do
-  ``catalogo_perfis_top100.json`` do run do modelo; pesos **aleatórios** que somam **100%**
-  (Dirichlet); só inferência — **não treina, não regista** nada (igual ao resto do script).
+- Carrega ``models:/<nome>/<versão>`` (pyfunc), resolve o run de origem e localiza
+  o catálogo de perfis por pesquisa recursiva nos artefatos do run.
+- Escolhe aleatoriamente um perfil entre os listados no JSON do catálogo.
+- ``--somente-inferencia``: só carrega o modelo e executa a predição.
+- ``--carteira N``: N perfis aleatórios do catálogo e pesos Dirichlet somando 100%%.
 
-Requer ``.env`` como em ``config/mlflow_config.py``.
+Requer credenciais/URI como em ``config/mlflow_config.py`` (``.env``).
 
 Uso (na raiz do repositório)::
 
+    set MLFLOW_REGISTERED_MODEL_NAME=elgin-sinistralidade-two-stage
     python pipelines/elgin/inferencia-mlflow.py --somente-inferencia
     python pipelines/elgin/inferencia-mlflow.py --somente-inferencia --carteira 7 --seed 42
     python pipelines/elgin/inferencia-mlflow.py
-    python pipelines/elgin/inferencia-mlflow.py --seed 42
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ import argparse
 import contextlib
 import importlib.util
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -44,9 +44,20 @@ sys.path.insert(0, str(ROOT_DIR))
 
 import predict as ep  # noqa: E402
 
-EXPERIMENT_FEATURE_IMPACT = "piam-elgin-feature-impact"
-ARTIFACT_CATALOG_REL = "elgin_artifacts/catalogo_perfis_top100.json"
-ARTIFACT_FEATURE_CSV_REL = "feature_impact/feature_correlation_sinistralidade.csv"
+
+def _registered_model_name(cli_value: str | None) -> str:
+    name = (cli_value or "").strip() or (os.getenv("MLFLOW_REGISTERED_MODEL_NAME") or "").strip()
+    if not name:
+        raise SystemExit(
+            "Defina o modelo registado: argumento --registered-model ou "
+            "variável de ambiente MLFLOW_REGISTERED_MODEL_NAME."
+        )
+    return name
+
+
+def _experiment_feature_impact_name(cli_value: str | None) -> str | None:
+    v = (cli_value or "").strip() or (os.getenv("MLFLOW_EXPERIMENT_FEATURE_IMPACT") or "").strip()
+    return v or None
 
 
 @contextlib.contextmanager
@@ -115,9 +126,34 @@ def _load_text_artifact(run_id: str, rel_path: str) -> str:
             return Path(local).read_text(encoding="utf-8-sig")
 
 
-def _print_artifact_tree(client: MlflowClient, run_id: str, path: str = "") -> None:
-    """Lista artefatos (nome, tamanho, dir) sem download para pasta do utilizador."""
+def _find_artifact_rel_path(
+    client: MlflowClient,
+    run_id: str,
+    *,
+    basename: str,
+) -> str | None:
+    """Procura ``basename`` nos artefatos do run (pesquisa recursiva via API)."""
 
+    def walk(path: str | None) -> str | None:
+        try:
+            entries = client.list_artifacts(run_id, path if path else None)
+        except Exception:
+            return None
+        for f in entries:
+            sub = f"{path}/{f.path}" if path else f.path
+            sub = sub.replace("\\", "/").strip("/")
+            if getattr(f, "is_dir", False):
+                found = walk(sub)
+                if found:
+                    return found
+            elif Path(f.path).name == basename or sub.endswith(basename):
+                return sub
+        return None
+
+    return walk(None)
+
+
+def _print_artifact_tree(client: MlflowClient, run_id: str, path: str = "") -> None:
     try:
         entries = client.list_artifacts(run_id, path if path else None)
     except Exception as e:
@@ -200,7 +236,6 @@ def _infer_one_profile(
     pipeline_variant: str,
     escolhido: dict[str, Any],
 ) -> tuple[float, float]:
-    """Uma linha → sinistralidade_prevista, p_sinistro (usa o pyfunc já carregado)."""
     indice_parquet = int(escolhido["indice_parquet"])
     df_raw_use = _df_raw_for_profile(
         pipeline_variant=pipeline_variant,
@@ -224,7 +259,6 @@ def _infer_one_profile(
 
 
 def _sample_profiles(perfis: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
-    """N perfis distintos se possível; senão repete (choices)."""
     if n <= 0:
         raise ValueError("n deve ser >= 1")
     if len(perfis) >= n:
@@ -233,7 +267,6 @@ def _sample_profiles(perfis: list[dict[str, Any]], n: int) -> list[dict[str, Any
 
 
 def _pesos_aleatorios_soma_um(n: int, rng: np.random.Generator) -> list[float]:
-    """Vetor aleatório estritamente positivo com soma 1 (partição de 100%)."""
     if n <= 0:
         raise ValueError("n deve ser >= 1")
     w = rng.dirichlet(np.ones(n)).tolist()
@@ -243,12 +276,12 @@ def _pesos_aleatorios_soma_um(n: int, rng: np.random.Generator) -> list[float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inferencia no ultimo modelo MLflow + listagem de artefatos (predict + feature-impact)"
+        description="Inferencia no modelo registado MLflow + listagem opcional de artefatos"
     )
     parser.add_argument(
         "--registered-model",
-        default=ep.MLFLOW_REGISTERED_MODEL_NAME,
-        help="Nome no Model Registry",
+        default=None,
+        help="Nome no Model Registry (alternativa a MLFLOW_REGISTERED_MODEL_NAME)",
     )
     parser.add_argument("--model-version", type=int, default=None, help="Versao fixa; omitir = latest")
     parser.add_argument("--seed", type=int, default=None, help="Semente para perfil aleatorio")
@@ -263,9 +296,14 @@ def main() -> None:
         default=None,
         metavar="N",
         help=(
-            "N utilizadores: perfis aleatorios do top100 do catalogo do run + pesos aleatorios "
-            "somando 100%%. Implica leitura MLflow/registry; nao treina nem regista."
+            "N utilizadores: perfis aleatorios do catalogo do run do modelo + pesos aleatorios "
+            "somando 100%%."
         ),
+    )
+    parser.add_argument(
+        "--experiment-feature-impact",
+        default=None,
+        help="Nome do experimento MLflow para feature-impact (ou MLFLOW_EXPERIMENT_FEATURE_IMPACT)",
     )
     args = parser.parse_args()
 
@@ -274,26 +312,32 @@ def main() -> None:
         random.seed(args.seed)
         np.random.seed(args.seed)
 
+    registered_name = _registered_model_name(args.registered_model)
+    exp_fi_name: str | None = _experiment_feature_impact_name(args.experiment_feature_impact)
+
     from config.mlflow_config import configurar_mlflow
 
-    configurar_mlflow(ep.MLFLOW_EXPERIMENT_NAME, preparar_experimento=False)
+    exp_main = (os.getenv("MLFLOW_EXPERIMENT_NAME") or "").strip()
+    configurar_mlflow(exp_main, preparar_experimento=False)
     client = MlflowClient()
 
     if args.model_version is not None:
-        mv = client.get_model_version(args.registered_model, str(args.model_version))
+        mv = client.get_model_version(registered_name, str(args.model_version))
     else:
-        mv = _latest_model_version(client, args.registered_model)
+        mv = _latest_model_version(client, registered_name)
 
     run_id_predict = mv.run_id
-    model_uri = f"models:/{args.registered_model}/{mv.version}"
+    model_uri = f"models:/{registered_name}/{mv.version}"
 
     listagens = not args.somente_inferencia and args.carteira is None
     run_id_fi: str | None = None
+    fi_csv_rel: str | None = None
+
     if listagens:
         print("\n" + "=" * 60)
         print("[Modelo registado]")
         print("=" * 60)
-        print(f"  name            : {args.registered_model}")
+        print(f"  name            : {registered_name}")
         print(f"  version         : {mv.version}")
         print(f"  run_id (treino) : {run_id_predict}")
         print(f"  model URI       : {model_uri}")
@@ -305,12 +349,15 @@ def main() -> None:
         _print_artifact_tree(client, run_id_predict, "")
 
         print("\n" + "=" * 60)
-        print(f"[Experimento] {EXPERIMENT_FEATURE_IMPACT} — ultimo run")
-        print("=" * 60)
-        exp_fi = client.get_experiment_by_name(EXPERIMENT_FEATURE_IMPACT)
-        if exp_fi is None:
-            print(f"  Experimento {EXPERIMENT_FEATURE_IMPACT!r} nao encontrado no tracking.")
+        if not exp_fi_name:
+            print("[Experimento feature-impact] omitido (defina MLFLOW_EXPERIMENT_FEATURE_IMPACT ou --experiment-feature-impact)")
         else:
+            print(f"[Experimento] {exp_fi_name} — ultimo run")
+        print("=" * 60)
+        exp_fi = client.get_experiment_by_name(exp_fi_name) if exp_fi_name else None
+        if exp_fi_name and exp_fi is None:
+            print(f"  Experimento {exp_fi_name!r} nao encontrado no tracking.")
+        elif exp_fi is not None:
             runs = client.search_runs(
                 experiment_ids=[exp_fi.experiment_id],
                 order_by=["start_time DESC"],
@@ -323,30 +370,44 @@ def main() -> None:
                 print(f"  run_id : {run_id_fi}")
                 _print_artifact_tree(client, run_id_fi, "")
 
-                csv_uri = _artifact_uri_run(run_id_fi, ARTIFACT_FEATURE_CSV_REL)
-                print(f"\n  CSV esperado (feature-impact): {csv_uri}")
-                try:
-                    txt = _load_text_artifact(run_id_fi, ARTIFACT_FEATURE_CSV_REL)
-                    lines = txt.splitlines()
-                    preview = "\n".join(lines[:15])
-                    print("  [preview primeiras linhas, em memoria]\n")
-                    print(preview)
-                    if len(lines) > 15:
-                        print(f"  ... ({len(lines) - 15} linhas a mais)")
-                except Exception as e:
-                    print(f"  [aviso] Nao foi possivel ler o CSV: {e}")
+                fi_csv_rel = _find_artifact_rel_path(
+                    client, run_id_fi, basename="feature_correlation_sinistralidade.csv"
+                )
+                if fi_csv_rel:
+                    csv_uri = _artifact_uri_run(run_id_fi, fi_csv_rel)
+                    print(f"\n  CSV feature-impact (descoberto via API): {csv_uri}")
+                    try:
+                        txt = _load_text_artifact(run_id_fi, fi_csv_rel)
+                        lines = txt.splitlines()
+                        preview = "\n".join(lines[:15])
+                        print("  [preview primeiras linhas, em memoria]\n")
+                        print(preview)
+                        if len(lines) > 15:
+                            print(f"  ... ({len(lines) - 15} linhas a mais)")
+                    except Exception as e:
+                        print(f"  [aviso] Nao foi possivel ler o CSV: {e}")
+                else:
+                    print("  [aviso] CSV feature_correlation_sinistralidade.csv nao encontrado no run.")
 
         print("\n" + "=" * 60)
-        print("[Catalogo top100 do run de predicao] -> perfil aleatorio")
+        print("[Catalogo de perfis no run de predicao] -> perfil aleatorio")
         print("=" * 60)
-    catalog_uri = _artifact_uri_run(run_id_predict, ARTIFACT_CATALOG_REL)
+
+    cat_rel = _find_artifact_rel_path(client, run_id_predict, basename="catalogo_perfis_top100.json")
+    if not cat_rel:
+        raise FileNotFoundError(
+            "Nao foi possivel localizar 'catalogo_perfis_top100.json' nos artefatos do run "
+            f"{run_id_predict} (pesquisa via MlflowClient.list_artifacts)."
+        )
+    catalog_uri = _artifact_uri_run(run_id_predict, cat_rel)
     if listagens:
         print(f"  URI: {catalog_uri}")
+
     try:
-        cat_text = _load_text_artifact(run_id_predict, ARTIFACT_CATALOG_REL)
+        cat_text = _load_text_artifact(run_id_predict, cat_rel)
     except Exception as e:
         raise FileNotFoundError(
-            f"Artefato {ARTIFACT_CATALOG_REL!r} inexistente ou inacessivel no run {run_id_predict}. {e}"
+            f"Artefato inacessivel no run {run_id_predict}: {cat_rel!r}. {e}"
         ) from e
 
     catalog = json.loads(cat_text)
@@ -399,16 +460,17 @@ def main() -> None:
             "modo": "carteira_n_usuarios",
             "n_usuarios": n,
             "pesos_somam": float(sum(pesos)),
-            "nota_pesos": "Pesos aleatorios (Dirichlet) somando 100%; perfis aleatorios do catalogo top100 deste run.",
+            "nota_pesos": "Pesos aleatorios (Dirichlet) somando 100%; perfis aleatorios do catalogo deste run.",
             "sinistralidade_prevista_media_ponderada": sin_pond,
             "p_sinistro_medio_ponderado": p_pond,
             "usuarios": usuarios,
             "model_uri": model_uri,
-            "registered_model": args.registered_model,
+            "registered_model": registered_name,
             "model_version": int(mv.version),
             "run_id_predict": run_id_predict,
             "pipeline_variant": pipeline_variant,
             "catalogo_artifact_uri": catalog_uri,
+            "catalogo_artifact_rel_path": cat_rel,
         }
     else:
         escolhido = random.choice(perfis)
@@ -424,7 +486,7 @@ def main() -> None:
             "sinistralidade_prevista": sin_pred,
             "p_sinistro": p_s,
             "model_uri": model_uri,
-            "registered_model": args.registered_model,
+            "registered_model": registered_name,
             "model_version": int(mv.version),
             "run_id_predict": run_id_predict,
             "pipeline_variant": pipeline_variant,
@@ -435,9 +497,10 @@ def main() -> None:
                 "resumo": escolhido.get("resumo"),
             },
             "catalogo_artifact_uri": catalog_uri,
+            "catalogo_artifact_rel_path": cat_rel,
             "feature_impact_run_id": run_id_fi,
-            "feature_impact_csv_uri": _artifact_uri_run(run_id_fi, ARTIFACT_FEATURE_CSV_REL)
-            if run_id_fi
+            "feature_impact_csv_uri": _artifact_uri_run(run_id_fi, fi_csv_rel)
+            if run_id_fi and fi_csv_rel
             else None,
         }
 

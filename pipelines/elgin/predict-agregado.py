@@ -2,11 +2,20 @@
 """
 Predict agregado por beneficiario — Sinistralidade ELGIN.
 
-Script autónomo (não importa ``predict.py``): treino com uma linha por beneficiário,
-saídas versionadas e registo MLflow com as mesmas convenções de naming do pipeline mensal.
+Script autónomo (não importa ``predict.py``): treino com uma linha por beneficiário e
+saídas versionadas em disco.
 
-Execução (Spyder / Jupyter): correr os blocos ``# %%`` em ordem; o bloco de treino
-inclui o registo MLflow no final — correr essa célula inteira para treinar e registar.
+**MLflow é opcional e isolado:** por defeito o treino **não** contacta o MLflow.
+Para registar modelo e métricas no servidor, execute com ``--mlflow`` (bloco separado
+no final do ficheiro).
+
+::
+
+    python pipelines/elgin/predict-agregado.py              # só treino + disco
+    python pipelines/elgin/predict-agregado.py --mlflow    # treino + registo MLflow
+
+Execução (Spyder / Jupyter): correr o bloco ``# %%`` de treino; o MLflow só corre se
+passar ``--mlflow`` na consola ou em ``sys.argv``.
 
 Geração de perfil: ``_json_safe``, ``serie_para_payload``, ``payload_do_parquet_por_indice_agregado``,
 ``salvar_payload`` (tudo neste ficheiro; sem módulo ``perfil`` à parte).
@@ -14,6 +23,7 @@ Geração de perfil: ``_json_safe``, ``serie_para_payload``, ``payload_do_parque
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -70,6 +80,23 @@ LEAKAGE_COLS: frozenset[str] = frozenset(
     }
 )
 
+FEATURES_BLOQUEADAS_INTERVENCAO: frozenset[str] = frozenset(
+    {
+        PREMIUM_COL,
+        TARGET_COL,
+        "sinistralidade_raw",
+        "valor_sinistro_raw",
+        "valor_sinistro_alt_val",
+        "valor_sinistro_ajustado",
+        "sin_ref",
+        "fator_ajuste_m",
+        "S_real_m",
+        "F_real_m",
+        "cod_beneficiario",
+        "competencia",
+    }
+)
+
 # Agregado: sem holdout temporal (valor só para consistência nos params MLflow)
 HOLDOUT_FRAC = 0.0
 N_SPLITS_CV = 5
@@ -80,6 +107,7 @@ BENEFICIARIO_COL = "cod_beneficiario"
 N_MESES_COL = "n_meses_obs"
 
 TOP_PERFIS_N = 100
+FEATURES_INTERVENCAO_FILENAME = "catalogo_features_intervencao.json"
 
 MLFLOW_EXPERIMENT_NAME = "piam-elgin-predict"
 MLFLOW_REGISTERED_MODEL_NAME = "elgin-sinistralidade-two-stage"
@@ -310,11 +338,23 @@ class TwoStageModel:
 
 
 def aggregate_sinistralidade_macro(y_pred: np.ndarray, premio: pd.Series) -> float:
+    """
+    Sinistralidade a nível carteira: média dos índices por beneficiário **ponderada**
+    pelo faturamento (prêmio) acumulado.
+
+    Equivale a ``sum(y_hat * premio) / sum(premio)`` (não ``sum(y_hat) / sum(premio)``):
+    o segundo mistura escala de índice adimensional com euros no denominador e deixa
+    o resultado artificialmente pequeno (~1e-4 em vez da escala do índice ~0,8).
+    """
     premio = pd.to_numeric(premio, errors="coerce").fillna(0.0)
     denom = float(premio.sum())
     if denom == 0.0:
         return float("nan")
-    return float(np.asarray(y_pred, dtype=float).sum() / denom)
+    y = np.asarray(y_pred, dtype=float).ravel()
+    p = np.asarray(premio, dtype=float).ravel()
+    if y.shape != p.shape:
+        raise ValueError(f"y_pred e premio devem ter o mesmo tamanho: {y.shape} vs {p.shape}")
+    return float((y * p).sum() / denom)
 
 
 def _mlflow_prepare_input_example(df: pd.DataFrame) -> pd.DataFrame:
@@ -433,7 +473,7 @@ def _mlflow_log_run_elgin_inner(
             if v is not None and not (isinstance(v, float) and np.isnan(v)):
                 mlflow.log_metric(k, float(v))
 
-        cat_path = run_dir / "catalogo_perfis_top100.json"
+        cat_path = run_dir / FEATURES_INTERVENCAO_FILENAME
         if cat_path.is_file():
             mlflow.log_artifact(str(cat_path), artifact_path="elgin_artifacts")
 
@@ -648,223 +688,335 @@ def build_catalogo_perfis_top100_agregado(
     }
 
 
-# %%
-# Treino, artefatos em disco, métricas e MLflow (mesma célula — registo depende das variáveis do treino)
-
-if not TRANSFORMED_PARQUET_PATH.is_file():
-    raise FileNotFoundError(f"Base transformada nao encontrada: {TRANSFORMED_PARQUET_PATH}")
-
-df_raw = pd.read_parquet(TRANSFORMED_PARQUET_PATH)
-df_raw[SEGMENT_COL] = df_raw[SEGMENT_COL].replace(PLANO_MAP)
-df_agg = aggregate_panel_by_beneficiary(df_raw)
-print(f"[Carga] painel={df_raw.shape} -> agregado={df_agg.shape}")
-
-n_before_q = len(df_agg)
-prem_ok = pd.to_numeric(df_agg[PREMIUM_COL], errors="coerce").fillna(0.0) > 0.0
-df_agg = df_agg.loc[prem_ok].copy()
-print(f"[Qualidade] removidas {n_before_q - len(df_agg)} linhas com faturamento <= 0")
-
-fc = load_feature_catalog()
-df = build_features_agregado(df_agg)
-feature_cols = resolve_feature_columns(df, fc)
-feature_cols = [c for c in feature_cols if c not in {N_MESES_COL}]
-if not feature_cols:
-    raise ValueError("Lista de features vazia apos agregacao.")
-
-version_label, run_dir = next_version_dir(OUTPUT_PREDICT_ROOT)
-models_dir = run_dir / "models"
-models_dir.mkdir(parents=True, exist_ok=True)
-print(f"[Versao] {run_dir}")
-
-all_pred_rows: list[pd.DataFrame] = []
-y_true_all: list[np.ndarray] = []
-y_pred_all: list[np.ndarray] = []
-premio_all: list[pd.Series] = []
-trained_segments: list[str] = []
-
-last_model_path: Path | None = None
-last_input_example: pd.DataFrame | None = None
-last_model_final: TwoStageModel | None = None
-
-for plano in sorted(df[SEGMENT_COL].dropna().astype(str).unique()):
-    df_seg = df[df[SEGMENT_COL].astype(str) == plano].dropna(subset=[TARGET_COL]).reset_index(drop=True)
-    if len(df_seg) < MIN_ROWS_SEGMENT:
-        print(f"[PULAR] {plano}: poucas linhas ({len(df_seg)})")
-        continue
-
-    X = ensure_no_object_dtype(df_seg[feature_cols].copy())
-    y = df_seg[TARGET_COL].astype(float)
-    fat = df_seg[PREMIUM_COL].astype(float)
-    sw = fat.values
-
-    cv = KFold(n_splits=N_SPLITS_CV, shuffle=True, random_state=RANDOM_STATE)
-    cv_mae: list[float] = []
-    for tr, te in cv.split(X):
-        m = TwoStageModel()
-        m.fit(X.iloc[tr], y.iloc[tr], sample_weight=sw[tr], outlier_cap_pct=OUTLIER_CAP_PCT)
-        yp = m.predict(X.iloc[te])
-        cv_mae.append(float(mean_absolute_error(y.iloc[te], yp)))
-    print(
-        f"[CV x{N_SPLITS_CV}] {plano} | MAE medio={float(np.mean(cv_mae)):.6f} | "
-        f"std_fold={float(np.std(cv_mae, ddof=1)):.6f}"
-    )
-
-    model_final = TwoStageModel()
-    model_final.fit(X, y, sample_weight=sw, outlier_cap_pct=OUTLIER_CAP_PCT)
-    p_pos, y_hat = model_final.predict_stages(X)
-
-    y_np = np.asarray(y, dtype=float)
-    y_hat_np = np.asarray(y_hat, dtype=float)
-    mae_seg = float(mean_absolute_error(y_np, y_hat_np))
-    rmse_seg = float(root_mean_squared_error(y_np, y_hat_np))
-    r2_seg = float(r2_score(y_np, y_hat_np))
-    sum_y = float(y_np.sum())
-    sum_y_hat = float(y_hat_np.sum())
-    sum_fat = float(fat.sum())
-    print(
-        f"  [Fit no segmento — valores assumidos] n={len(y_np)} | "
-        f"MAE={mae_seg:.6f} | RMSE={rmse_seg:.6f} | R2={r2_seg:.6f}"
-    )
-    print(
-        f"  [Somas no segmento] sum(y_true)={sum_y:.4f} | sum(y_pred)={sum_y_hat:.4f} | "
-        f"sum({PREMIUM_COL})={sum_fat:.4f}"
-    )
-    y_bin = (y_np > 0).astype(int)
-    if y_bin.size > 1 and np.unique(y_bin).size > 1:
-        auc_s = float(roc_auc_score(y_bin, p_pos))
-        ap_s = float(average_precision_score(y_bin, p_pos))
-        print(f"  [Stage 1 — P(y>0) vs presenca real] AUC={auc_s:.6f} | AP={ap_s:.6f}")
-    else:
-        print("  [Stage 1] AUC/AP omitidos (uma so classe em y>0).")
-
-    out_micro = X.copy()
-    out_micro.insert(0, SEGMENT_COL, df_seg[SEGMENT_COL].values)
-    out_micro["p_sinistro"] = p_pos
-    out_micro["sinistralidade_prevista"] = y_hat
-    all_pred_rows.append(out_micro)
-
-    y_true_all.append(y.values)
-    y_pred_all.append(np.asarray(y_hat, dtype=float))
-    premio_all.append(fat.reset_index(drop=True))
-
-    model_path = models_dir / f"model_{plano_slug(plano)}.pkl"
-    joblib.dump(model_final, model_path)
-    print(f"[OK] Modelo salvo: {model_path}")
-
-    last_model_path = model_path
-    last_input_example = X.iloc[[0]].copy()
-    last_model_final = model_final
-    trained_segments.append(str(plano))
-
-VERSION_LABEL = version_label
-RUN_DIR = run_dir
-FEATURE_COLS = feature_cols
-DF_AGG_N = len(df_agg)
-TRAINED_SEGMENTS = trained_segments
-LAST_MODEL_PATH = last_model_path
-LAST_INPUT_EXAMPLE = last_input_example
-LAST_MODEL_FINAL = last_model_final
-
-if not all_pred_rows:
-    print("Nenhum segmento treinado; sem artefatos.")
-    METRICS_MLFLOW = {}
-else:
-    pred_micro = pd.concat(all_pred_rows, axis=0, ignore_index=True)
-    micro_path = run_dir / "predicoes_micro.csv"
-    pred_micro.to_csv(micro_path, index=False, encoding="utf-8-sig")
-
-    yt = np.concatenate(y_true_all)
-    yp = np.concatenate(y_pred_all)
-    pr = pd.concat(premio_all, axis=0, ignore_index=True)
-    macro_real = aggregate_sinistralidade_macro(yt, pr)
-    macro_pred = aggregate_sinistralidade_macro(yp, pr)
-    erro_rel = abs(macro_pred - macro_real) / macro_real if macro_real and not np.isnan(macro_real) else float("nan")
-    macro_payload = {
-        "versao": version_label,
-        "sinistralidade_real": float(macro_real),
-        "sinistralidade_prevista": float(macro_pred),
-        "erro_relativo": float(erro_rel),
-        "tipo_treino": "agregado_por_beneficiario",
+def _descricao_regra_elegibilidade(feature: str) -> str:
+    regras_txt: dict[str, str] = {
+        "qtd_servico_CARDIOLOGIA": "idade >= 30",
+        "qtd_servico_QUIMIOTERAPIA": "qtd_servico_QUIMIOTERAPIA > 0",
+        "qtd_servico_ENDOSCOPIA": "idade >= 40",
+        "qtd_servico_CIRURGICO": "idade >= 12",
+        "qtd_servico_DIÁRIA": "qtd_conta_INTERNADO > 0",
+        "qtd_esp_cardio": "idade >= 30",
+        "qtd_esp_ped": "idade <= 18",
+        "qtd_esp_gine": "sexo == 'F'",
+        "qtd_esp_cirurg": "idade >= 12",
+        "qtd_carater_eletivo": "tipo_cadastro == 'TITULAR'",
+        "qtd_conta_INTERNADO": "delta>0: qtd_conta_INTERNADO > 0 | delta<0: universal",
     }
-    macro_path = run_dir / "resultado_macro.json"
-    macro_path.write_text(json.dumps(macro_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return regras_txt.get(feature, "universal")
 
-    catalog_path = run_dir / "catalogo_perfis_top100.json"
-    cat = build_catalogo_perfis_top100_agregado(version_label, df_agg, df, feature_cols)
-    catalog_path.write_text(json.dumps(cat, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    METRICS_MLFLOW = {
-        "mae_global": float(mean_absolute_error(yt, yp)),
-        "rmse_global": float(root_mean_squared_error(yt, yp)),
-        "r2_global": float(r2_score(yt, yp)),
-        "holdout_macro_sin_real": float(macro_real),
-        "holdout_macro_sin_pred": float(macro_pred),
-        "holdout_macro_erro_relativo": float(erro_rel),
+def build_catalogo_features_intervencao(
+    version_label: str,
+    df_agg: pd.DataFrame,
+    fc: pd.DataFrame,
+) -> dict[str, Any]:
+    from pipelines.predict.what_if.elegibilidade import calcular_elegibilidade
+
+    feature_to_category = (
+        fc[["feature_name", "category"]]
+        .dropna(subset=["feature_name"])
+        .assign(feature_name=lambda x: x["feature_name"].astype(str))
+        .set_index("feature_name")["category"]
+        .to_dict()
+    )
+    feature_to_dtype = (
+        fc[["feature_name", "dtype"]]
+        .dropna(subset=["feature_name"])
+        .assign(feature_name=lambda x: x["feature_name"].astype(str))
+        .set_index("feature_name")["dtype"]
+        .to_dict()
+    )
+
+    elegiveis_catalogo = set(catalog_eligible_names(fc))
+    dtypes_intervencionaveis = {"numeric", "count"}
+    candidatas = [
+        c
+        for c in sorted(df_agg.columns)
+        if (
+            c in elegiveis_catalogo
+            and c not in FEATURES_BLOQUEADAS_INTERVENCAO
+            and str(feature_to_dtype.get(c, "")).lower() in dtypes_intervencionaveis
+        )
+    ]
+
+    n_total = int(len(df_agg))
+    grupos: dict[str, list[dict[str, Any]]] = {}
+    for feat in candidatas:
+        mask_pos = calcular_elegibilidade(df_agg, feat, 20.0)
+        mask_neg = calcular_elegibilidade(df_agg, feat, -20.0)
+
+        serie = pd.to_numeric(df_agg[feat], errors="coerce").fillna(0.0)
+        n_gt0_total = int((serie > 0.0).sum())
+        n_gt0_elig_pos = int(((serie > 0.0) & mask_pos).sum())
+
+        item = {
+            "feature": feat,
+            "categoria": str(feature_to_category.get(feat, "sem_categoria")),
+            "dtype_catalogo": str(feature_to_dtype.get(feat, "n/a")),
+            "regra_elegibilidade": _descricao_regra_elegibilidade(feat),
+            "n_elegiveis_delta_positivo": int(mask_pos.sum()),
+            "n_elegiveis_delta_negativo": int(mask_neg.sum()),
+            "n_nao_elegiveis_delta_positivo": int(n_total - int(mask_pos.sum())),
+            "n_com_valor_atual_gt_zero_total": n_gt0_total,
+            "n_com_valor_atual_gt_zero_elegiveis_delta_positivo": n_gt0_elig_pos,
+            "pct_base_elegivel_delta_positivo": round(float(mask_pos.sum()) / max(1, n_total) * 100.0, 2),
+        }
+        grupo = item["categoria"]
+        grupos.setdefault(grupo, []).append(item)
+
+    grupos_lista: list[dict[str, Any]] = []
+    for grupo_nome in sorted(grupos):
+        feats = sorted(grupos[grupo_nome], key=lambda x: x["feature"])
+        grupos_lista.append(
+            {
+                "grupo": grupo_nome,
+                "n_features": len(feats),
+                "features": feats,
+            }
+        )
+
+    return {
+        "versao_pasta": version_label,
+        "n_total_base": n_total,
+        "n_features_intervencionaveis": len(candidatas),
+        "descricao": (
+            "Catálogo de features intervencionáveis para what-if (base agregada por beneficiário). "
+            "As quantidades de elegibilidade usam as regras do módulo what_if.elegibilidade."
+        ),
+        "grupos": grupos_lista,
     }
-    sum_yt = float(np.asarray(yt, dtype=float).sum())
-    sum_yp = float(np.asarray(yp, dtype=float).sum())
-    sum_pr = float(pd.to_numeric(pr, errors="coerce").fillna(0.0).sum())
-    print("\n" + "=" * 60)
-    print("[Metricas globais — calculadas a partir de y_true, y_pred e premio por linha]")
-    print("=" * 60)
-    print(f"  n_linhas (predicoes micro) = {len(yt):,}")
-    print(f"  mae_global               = {METRICS_MLFLOW['mae_global']:.8f}")
-    print(f"  rmse_global              = {METRICS_MLFLOW['rmse_global']:.8f}")
-    print(f"  r2_global                = {METRICS_MLFLOW['r2_global']:.8f}")
-    print(
-        "  Macro sinistralidade: sum(y)/sum(premio) e sum(y_pred)/sum(premio); "
-        f"sum(premio)={sum_pr:,.4f}"
-    )
-    print(f"  sum(y_true)              = {sum_yt:,.8f}")
-    print(f"  sum(y_pred)              = {sum_yp:,.8f}")
-    print(f"  holdout_macro_sin_real   = {METRICS_MLFLOW['holdout_macro_sin_real']:.8f}")
-    print(f"  holdout_macro_sin_pred   = {METRICS_MLFLOW['holdout_macro_sin_pred']:.8f}")
-    print(f"  holdout_macro_erro_rel  = {METRICS_MLFLOW['holdout_macro_erro_relativo']:.8f}")
-    y_bin_g = (np.asarray(yt, dtype=float) > 0).astype(int)
-    p_concat = pred_micro["p_sinistro"].values if len(pred_micro) == len(yt) else None
-    if p_concat is not None and y_bin_g.size > 1 and np.unique(y_bin_g).size > 1:
-        auc_g = float(roc_auc_score(y_bin_g, p_concat))
-        ap_g = float(average_precision_score(y_bin_g, p_concat))
-        print(f"  auc_global (P(y>0) vs y>0) = {auc_g:.8f}")
-        print(f"  ap_global  (P(y>0) vs y>0) = {ap_g:.8f}")
-        METRICS_MLFLOW["auc_global"] = auc_g
-        METRICS_MLFLOW["ap_global"] = ap_g
-    print(
-        f"  [Hipoteses numericas] n_splits_cv={N_SPLITS_CV} | min_rows_segmento={MIN_ROWS_SEGMENT} | "
-        f"outlier_cap_pct={OUTLIER_CAP_PCT} | random_state={RANDOM_STATE}"
-    )
-    print("=" * 60)
-    print(f"=== Treino e artefatos gravados em {run_dir} ===")
 
-if LAST_MODEL_FINAL is not None and LAST_MODEL_PATH is not None and VERSION_LABEL is not None and RUN_DIR is not None:
-    params_ml = {
-        "pipeline_variant": "agregado_por_beneficiario",
-        "n_features": len(FEATURE_COLS),
-        "n_linhas_agregadas": DF_AGG_N,
-        "segmentos_treinados": ",".join(TRAINED_SEGMENTS),
-    }
-    _mlflow_log_run_elgin(
-        run_dir=RUN_DIR,
-        version_label=VERSION_LABEL,
-        model_path=LAST_MODEL_PATH,
-        input_example=LAST_INPUT_EXAMPLE,
-        model_final=LAST_MODEL_FINAL,
-        params_extra=params_ml,
-        metrics_extra=METRICS_MLFLOW,
+
+# Treino (só ao executar o ficheiro como script; não corre em ``import``).
+if __name__ == '__main__':
+    _parser = argparse.ArgumentParser(description="Treino agregado ELGIN (sinistralidade)")
+    _parser.add_argument(
+        "--mlflow",
+        action="store_true",
+        help="Após gravar artefatos em disco, registar run e modelo no MLflow",
     )
-    print("\n[MLflow — consola] Parametros extra registados:")
-    for k, v in sorted(params_ml.items()):
-        print(f"  {k} = {v}")
-    print("[MLflow — consola] Metricas registadas:")
-    for k, v in sorted(METRICS_MLFLOW.items()):
-        if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
-            print(f"  {k} = {v}")
+    _cli = _parser.parse_args()
+
+    # %%
+    # Treino e artefatos em disco (sem MLflow; ver bloco final com if _cli.mlflow)
+
+    if not TRANSFORMED_PARQUET_PATH.is_file():
+        raise FileNotFoundError(f"Base transformada nao encontrada: {TRANSFORMED_PARQUET_PATH}")
+
+    df_raw = pd.read_parquet(TRANSFORMED_PARQUET_PATH)
+    df_raw[SEGMENT_COL] = df_raw[SEGMENT_COL].replace(PLANO_MAP)
+    df_agg = aggregate_panel_by_beneficiary(df_raw)
+    print(f"[Carga] painel={df_raw.shape} -> agregado={df_agg.shape}")
+
+    n_before_q = len(df_agg)
+    prem_ok = pd.to_numeric(df_agg[PREMIUM_COL], errors="coerce").fillna(0.0) > 0.0
+    df_agg = df_agg.loc[prem_ok].copy()
+    print(f"[Qualidade] removidas {n_before_q - len(df_agg)} linhas com faturamento <= 0")
+
+    fc = load_feature_catalog()
+    df = build_features_agregado(df_agg)
+    feature_cols = resolve_feature_columns(df, fc)
+    feature_cols = [c for c in feature_cols if c not in {N_MESES_COL}]
+    if not feature_cols:
+        raise ValueError("Lista de features vazia apos agregacao.")
+
+    version_label, run_dir = next_version_dir(OUTPUT_PREDICT_ROOT)
+    models_dir = run_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[Versao] {run_dir}")
+
+    all_pred_rows: list[pd.DataFrame] = []
+    y_true_all: list[np.ndarray] = []
+    y_pred_all: list[np.ndarray] = []
+    premio_all: list[pd.Series] = []
+    trained_segments: list[str] = []
+
+    last_model_path: Path | None = None
+    last_input_example: pd.DataFrame | None = None
+    last_model_final: TwoStageModel | None = None
+
+    for plano in sorted(df[SEGMENT_COL].dropna().astype(str).unique()):
+        df_seg = df[df[SEGMENT_COL].astype(str) == plano].dropna(subset=[TARGET_COL]).reset_index(drop=True)
+        if len(df_seg) < MIN_ROWS_SEGMENT:
+            print(f"[PULAR] {plano}: poucas linhas ({len(df_seg)})")
+            continue
+
+        X = ensure_no_object_dtype(df_seg[feature_cols].copy())
+        y = df_seg[TARGET_COL].astype(float)
+        fat = df_seg[PREMIUM_COL].astype(float)
+        sw = fat.values
+
+        cv = KFold(n_splits=N_SPLITS_CV, shuffle=True, random_state=RANDOM_STATE)
+        cv_mae: list[float] = []
+        for tr, te in cv.split(X):
+            m = TwoStageModel()
+            m.fit(X.iloc[tr], y.iloc[tr], sample_weight=sw[tr], outlier_cap_pct=OUTLIER_CAP_PCT)
+            yp = m.predict(X.iloc[te])
+            cv_mae.append(float(mean_absolute_error(y.iloc[te], yp)))
+        print(
+            f"[CV x{N_SPLITS_CV}] {plano} | MAE medio={float(np.mean(cv_mae)):.6f} | "
+            f"std_fold={float(np.std(cv_mae, ddof=1)):.6f}"
+        )
+
+        model_final = TwoStageModel()
+        model_final.fit(X, y, sample_weight=sw, outlier_cap_pct=OUTLIER_CAP_PCT)
+        p_pos, y_hat = model_final.predict_stages(X)
+
+        y_np = np.asarray(y, dtype=float)
+        y_hat_np = np.asarray(y_hat, dtype=float)
+        mae_seg = float(mean_absolute_error(y_np, y_hat_np))
+        rmse_seg = float(root_mean_squared_error(y_np, y_hat_np))
+        r2_seg = float(r2_score(y_np, y_hat_np))
+        sum_y = float(y_np.sum())
+        sum_y_hat = float(y_hat_np.sum())
+        sum_fat = float(fat.sum())
+        print(
+            f"  [Fit no segmento — valores assumidos] n={len(y_np)} | "
+            f"MAE={mae_seg:.6f} | RMSE={rmse_seg:.6f} | R2={r2_seg:.6f}"
+        )
+        print(
+            f"  [Somas no segmento] sum(y_true)={sum_y:.4f} | sum(y_pred)={sum_y_hat:.4f} | "
+            f"sum({PREMIUM_COL})={sum_fat:.4f}"
+        )
+        y_bin = (y_np > 0).astype(int)
+        if y_bin.size > 1 and np.unique(y_bin).size > 1:
+            auc_s = float(roc_auc_score(y_bin, p_pos))
+            ap_s = float(average_precision_score(y_bin, p_pos))
+            print(f"  [Stage 1 — P(y>0) vs presenca real] AUC={auc_s:.6f} | AP={ap_s:.6f}")
         else:
-            print(f"  {k} = {v}")
-elif LAST_MODEL_FINAL is None:
-    print("[MLflow] Ignorado — nenhum segmento treinado.")
+            print("  [Stage 1] AUC/AP omitidos (uma so classe em y>0).")
 
-if RUN_DIR is not None:
-    print(f"\n=== Concluido — saida em {RUN_DIR} ===")
+        out_micro = X.copy()
+        out_micro.insert(0, SEGMENT_COL, df_seg[SEGMENT_COL].values)
+        out_micro["p_sinistro"] = p_pos
+        out_micro["sinistralidade_prevista"] = y_hat
+        all_pred_rows.append(out_micro)
+
+        y_true_all.append(y.values)
+        y_pred_all.append(np.asarray(y_hat, dtype=float))
+        premio_all.append(fat.reset_index(drop=True))
+
+        model_path = models_dir / f"model_{plano_slug(plano)}.pkl"
+        joblib.dump(model_final, model_path)
+        print(f"[OK] Modelo salvo: {model_path}")
+
+        last_model_path = model_path
+        last_input_example = X.iloc[[0]].copy()
+        last_model_final = model_final
+        trained_segments.append(str(plano))
+
+    VERSION_LABEL = version_label
+    RUN_DIR = run_dir
+    FEATURE_COLS = feature_cols
+    DF_AGG_N = len(df_agg)
+    TRAINED_SEGMENTS = trained_segments
+    LAST_MODEL_PATH = last_model_path
+    LAST_INPUT_EXAMPLE = last_input_example
+    LAST_MODEL_FINAL = last_model_final
+
+    if not all_pred_rows:
+        print("Nenhum segmento treinado; sem artefatos.")
+        METRICS_MLFLOW = {}
+    else:
+        pred_micro = pd.concat(all_pred_rows, axis=0, ignore_index=True)
+        micro_path = run_dir / "predicoes_micro.csv"
+        pred_micro.to_csv(micro_path, index=False, encoding="utf-8-sig")
+
+        yt = np.concatenate(y_true_all)
+        yp = np.concatenate(y_pred_all)
+        pr = pd.concat(premio_all, axis=0, ignore_index=True)
+        macro_real = aggregate_sinistralidade_macro(yt, pr)
+        macro_pred = aggregate_sinistralidade_macro(yp, pr)
+        erro_rel = abs(macro_pred - macro_real) / macro_real if macro_real and not np.isnan(macro_real) else float("nan")
+        macro_payload = {
+            "versao": version_label,
+            "sinistralidade_real": float(macro_real),
+            "sinistralidade_prevista": float(macro_pred),
+            "erro_relativo": float(erro_rel),
+            "tipo_treino": "agregado_por_beneficiario",
+        }
+        macro_path = run_dir / "resultado_macro.json"
+        macro_path.write_text(json.dumps(macro_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        catalog_path = run_dir / FEATURES_INTERVENCAO_FILENAME
+        cat = build_catalogo_features_intervencao(version_label, df_agg, fc)
+        catalog_path.write_text(json.dumps(cat, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        METRICS_MLFLOW = {
+            "mae_global": float(mean_absolute_error(yt, yp)),
+            "rmse_global": float(root_mean_squared_error(yt, yp)),
+            "r2_global": float(r2_score(yt, yp)),
+            "holdout_macro_sin_real": float(macro_real),
+            "holdout_macro_sin_pred": float(macro_pred),
+            "holdout_macro_erro_relativo": float(erro_rel),
+        }
+        sum_yt = float(np.asarray(yt, dtype=float).sum())
+        sum_yp = float(np.asarray(yp, dtype=float).sum())
+        sum_pr = float(pd.to_numeric(pr, errors="coerce").fillna(0.0).sum())
+        print("\n" + "=" * 60)
+        print("[Metricas globais — calculadas a partir de y_true, y_pred e premio por linha]")
+        print("=" * 60)
+        print(f"  n_linhas (predicoes micro) = {len(yt):,}")
+        print(f"  mae_global               = {METRICS_MLFLOW['mae_global']:.8f}")
+        print(f"  rmse_global              = {METRICS_MLFLOW['rmse_global']:.8f}")
+        print(f"  r2_global                = {METRICS_MLFLOW['r2_global']:.8f}")
+        print(
+            "  Macro sinistralidade: sum(y*premio)/sum(premio) e sum(y_pred*premio)/sum(premio); "
+            f"sum(premio)={sum_pr:,.4f}"
+        )
+        print(f"  sum(y_true)              = {sum_yt:,.8f}")
+        print(f"  sum(y_pred)              = {sum_yp:,.8f}")
+        print(f"  holdout_macro_sin_real   = {METRICS_MLFLOW['holdout_macro_sin_real']:.8f}")
+        print(f"  holdout_macro_sin_pred   = {METRICS_MLFLOW['holdout_macro_sin_pred']:.8f}")
+        print(f"  holdout_macro_erro_rel  = {METRICS_MLFLOW['holdout_macro_erro_relativo']:.8f}")
+        y_bin_g = (np.asarray(yt, dtype=float) > 0).astype(int)
+        p_concat = pred_micro["p_sinistro"].values if len(pred_micro) == len(yt) else None
+        if p_concat is not None and y_bin_g.size > 1 and np.unique(y_bin_g).size > 1:
+            auc_g = float(roc_auc_score(y_bin_g, p_concat))
+            ap_g = float(average_precision_score(y_bin_g, p_concat))
+            print(f"  auc_global (P(y>0) vs y>0) = {auc_g:.8f}")
+            print(f"  ap_global  (P(y>0) vs y>0) = {ap_g:.8f}")
+            METRICS_MLFLOW["auc_global"] = auc_g
+            METRICS_MLFLOW["ap_global"] = ap_g
+        print(
+            f"  [Hipoteses numericas] n_splits_cv={N_SPLITS_CV} | min_rows_segmento={MIN_ROWS_SEGMENT} | "
+            f"outlier_cap_pct={OUTLIER_CAP_PCT} | random_state={RANDOM_STATE}"
+        )
+        print("=" * 60)
+        print(f"=== Treino e artefatos gravados em {run_dir} ===")
+
+    # %%
+    # MLflow — opcional; executar só com --mlflow (após artefatos em disco)
+    if _cli.mlflow:
+        if LAST_MODEL_FINAL is not None and LAST_MODEL_PATH is not None and VERSION_LABEL is not None and RUN_DIR is not None:
+            params_ml = {
+                "pipeline_variant": "agregado_por_beneficiario",
+                "n_features": len(FEATURE_COLS),
+                "n_linhas_agregadas": DF_AGG_N,
+                "segmentos_treinados": ",".join(TRAINED_SEGMENTS),
+            }
+            _mlflow_log_run_elgin(
+                run_dir=RUN_DIR,
+                version_label=VERSION_LABEL,
+                model_path=LAST_MODEL_PATH,
+                input_example=LAST_INPUT_EXAMPLE,
+                model_final=LAST_MODEL_FINAL,
+                params_extra=params_ml,
+                metrics_extra=METRICS_MLFLOW,
+            )
+            print("\n[MLflow — consola] Parametros extra registados:")
+            for k, v in sorted(params_ml.items()):
+                print(f"  {k} = {v}")
+            print("[MLflow — consola] Metricas registadas:")
+            for k, v in sorted(METRICS_MLFLOW.items()):
+                if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                    print(f"  {k} = {v}")
+                else:
+                    print(f"  {k} = {v}")
+        elif LAST_MODEL_FINAL is None:
+            print("[MLflow] Ignorado — nenhum segmento treinado.")
+
+    if RUN_DIR is not None:
+        print(f"\n=== Concluido — saida em {RUN_DIR} ===")
 
 # %%
