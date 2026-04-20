@@ -1,0 +1,57 @@
+feature_name,category,dtype
+cod_beneficiario,identificacao,identifier
+competencia,contratual,categorical
+valor_faturamento,financeiro,monetary
+idade,demografico,numeric
+sexo,demografico,categorical
+tipo_cadastro,contratual,categorical
+plano,contratual,categorical
+valor_sinistro_raw,resultado,leakage
+qtd_eventos_sinistro,utilizacao,count
+qtd_carater_eletivo,utilizacao,count
+qtd_carater_urgencia,utilizacao,count
+valor_sinistro_alt_val,resultado,leakage
+qtd_conta_ATENDIMENTO AMBULATORIAL,utilizacao,count
+qtd_conta_ELETIVO,utilizacao,count
+qtd_conta_EXTERNO,utilizacao,count
+qtd_conta_INTERNADO,utilizacao,count
+qtd_conta_NA,utilizacao,count
+qtd_conta_PRONTO SOCORRO,utilizacao,count
+qtd_conta_URGÊNCIA \ EMERGÊNCIA,utilizacao,count
+qtd_servico_ACUPUNTURA,utilizacao,count
+qtd_servico_CARDIOLOGIA,utilizacao,count
+qtd_servico_CIRURGICO,utilizacao,count
+qtd_servico_CLÍNICO,utilizacao,count
+qtd_servico_CONSULTA,utilizacao,count
+qtd_servico_DIÁRIA,utilizacao,count
+qtd_servico_ENDOSCOPIA,utilizacao,count
+qtd_servico_FISIOTERAPIA,utilizacao,count
+qtd_servico_LABORATÓRIO,utilizacao,count
+qtd_servico_QUIMIOTERAPIA,utilizacao,count
+qtd_servico_RADIOLOGIA,utilizacao,count
+qtd_servico_RESSONÂNCIA MAGNÉTICA,utilizacao,count
+qtd_servico_TERAPIA,utilizacao,count
+qtd_servico_TOMOGRAFIA,utilizacao,count
+qtd_servico_ULTRA-SONOGRAFIA,utilizacao,count
+qtd_servico___OUTROS__,utilizacao,count
+qtd_esp_cardio,utilizacao,count
+qtd_esp_cirurg,utilizacao,count
+qtd_esp_clin_geral,utilizacao,count
+qtd_esp_derm,utilizacao,count
+qtd_esp_gine,utilizacao,count
+qtd_esp_lab_imagem,utilizacao,count
+qtd_esp_neuro,utilizacao,count
+qtd_esp_oftal,utilizacao,count
+qtd_esp_orto,utilizacao,count
+qtd_esp_otorrino,utilizacao,count
+qtd_esp_outros,utilizacao,count
+qtd_esp_ped,utilizacao,count
+qtd_esp_psiq,utilizacao,count
+pct_urgencia,utilizacao,numeric
+sinistralidade_raw,resultado,leakage
+sin_ref,resultado,leakage
+fator_ajuste_m,resultado,leakage
+S_real_m,resultado,leakage
+F_real_m,resultado,leakage
+valor_sinistro_ajustado,resultado,leakage
+sinistralidade_final,derivada,target

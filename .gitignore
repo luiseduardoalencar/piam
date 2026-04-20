@@ -103,6 +103,11 @@ data/processed/elgin/predict/v20/what_if_mensal/*
 !data/raw/elgin/base_analitica/
 !data/raw/elgin/base_analitica/painel_sinistralidade_v1.parquet
 
+# Catálogo de features (pipelines predict / what-if) — obrigatório no deploy
+!data/auxiliar/
+!data/auxiliar/elgin/
+!data/auxiliar/elgin/feature_catalog.csv
+
 # Ficheiros temporários locais (não enviar ao remoto)
 /tmp_interv.json
 
