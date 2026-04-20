@@ -57,6 +57,17 @@ MODO_IDADE_RADIO_HELP = (
 )
 
 
+def _fmt_sinistralidade_index_pct(value: Any, *, nd: int = 2) -> str:
+    """Índice em razão (ex.: 0,976 ou 1,071) → percentagem na UI (97,60% ou 107,10%)."""
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if np.isnan(x):
+        return "-"
+    return f"{x * 100.0:.{nd}f}%"
+
+
 def require_login() -> bool:
     if st.session_state.get("authenticated_user"):
         return True
@@ -361,8 +372,8 @@ def render_calibracao_mes_section(
     c1.metric("Competência", str(kpi_mes.get("competencia_referencia", "-")))
     c2.metric(
         "Sinistralidade ajustada (mês)",
-        f"{real_mes:.6f}",
-        help="Mesmo KPI da faixa superior: sinistros ajustados ÷ faturamento do mês.",
+        _fmt_sinistralidade_index_pct(real_mes),
+        help="Índice do mês (sinistros ajustados ÷ faturamento). Valor ×100 em %.",
     )
 
     if baseline_predito is None or np.isnan(float(baseline_predito)):
@@ -374,9 +385,19 @@ def render_calibracao_mes_section(
     pred_mes = float(baseline_predito)
     gap_abs = pred_mes - real_mes
     gap_rel = (gap_abs / real_mes * 100.0) if real_mes != 0 else float("nan")
-    c3.metric("Baseline predito (modelo)", f"{pred_mes:.6f}")
-    c4.metric("Gap calibração", f"{gap_rel:+.2f}%")
-    st.caption(f"Gap absoluto (predito - real): {gap_abs:+.6f}")
+    c3.metric(
+        "Baseline predito (modelo)",
+        _fmt_sinistralidade_index_pct(pred_mes),
+        help="Índice previsto pelo modelo (mesma escala; ×100 em %).",
+    )
+    c4.metric(
+        "Gap calibração",
+        f"{gap_rel:+.2f}%",
+        help="Erro relativo do baseline face ao real: (predito − real) / real.",
+    )
+    st.caption(
+        f"Diferença em pontos percentuais (predito − real): **{gap_abs * 100.0:+.2f} p.p.**"
+    )
 
 
 def _counts_from_percentages(percentages: dict[str, float], total: int) -> dict[str, int]:
@@ -653,33 +674,24 @@ def _show_profile_modal(profile: dict[str, Any], highlight_features: list[str]) 
 
 
 def render_prediction_tab() -> None:
-    st.header("Predição por features (What-If)")
+    st.header("Predição por features")
     st.caption("Selecione grupo e feature para executar intervenção no pipeline real de predição.")
     kpi: dict[str, Any] | None = None
     try:
         kpi = load_kpi_mes_atual()
 
-        def _fmt_num(v: Any, nd: int = 6) -> str:
-            try:
-                x = float(v)
-            except (TypeError, ValueError):
-                return "-"
-            if np.isnan(x):
-                return "-"
-            return f"{x:.{nd}f}"
-
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Competência de referência", kpi["competencia_referencia"])
         k2.metric(
             "Sinistralidade ajustada (mês)",
-            _fmt_num(kpi.get("sinistralidade_ajustada_mes")),
-            help="Total de sinistro ajustado do mês ÷ faturamento do mês (carteira). Usada na calibração com o modelo.",
+            _fmt_sinistralidade_index_pct(kpi.get("sinistralidade_ajustada_mes")),
+            help="Índice do mês (sinistros ajustados ÷ faturamento). Valor ×100 em %.",
         )
         k3.metric("Vidas no mês", f"{int(kpi['n_vidas_mes']):,}")
         k4.metric("Faturamento do mês", f"{float(kpi['faturamento_mes']):,.2f}")
         st.caption(
-            "**Sinistralidade ajustada:** sinistros ajustados do mês ÷ faturamento do mês (carteira). "
-            "Usada para comparar com o baseline predito na secção de calibração."
+            "**Sinistralidade ajustada:** índice sinistros ajustados ÷ faturamento do mês; "
+            "os números acima estão em **%** (índice × 100)."
         )
     except Exception as e:
         st.warning(f"Não foi possível carregar KPI mensal da base raw: {e}")
@@ -777,9 +789,22 @@ def render_prediction_tab() -> None:
         if resultado:
             st.subheader("Resultado da Simulação")
             rr1, rr2, rr3, rr4 = st.columns(4)
-            rr1.metric("Sinistralidade antes", f"{float(resultado.get('sinistralidade_antes', 0.0)):.6f}")
-            rr2.metric("Sinistralidade depois", f"{float(resultado.get('sinistralidade_depois', 0.0)):.6f}")
-            rr3.metric("Delta absoluto", f"{float(resultado.get('delta_absoluto', 0.0)):+.8f}")
+            rr1.metric(
+                "Sinistralidade antes",
+                _fmt_sinistralidade_index_pct(resultado.get("sinistralidade_antes", 0.0)),
+                help="Índice macro antes da intervenção (×100 em %).",
+            )
+            rr2.metric(
+                "Sinistralidade depois",
+                _fmt_sinistralidade_index_pct(resultado.get("sinistralidade_depois", 0.0)),
+                help="Índice macro depois da intervenção (×100 em %).",
+            )
+            d_abs = float(resultado.get("delta_absoluto", 0.0))
+            rr3.metric(
+                "Delta (p.p.)",
+                f"{d_abs * 100.0:+.2f} p.p.",
+                help="Variação do índice em pontos percentuais (diferença das taxas × 100).",
+            )
             rr4.metric("Delta relativo", f"{float(resultado.get('delta_relativo_pct', 0.0)):+.4f}%")
 
             ee1, ee2, ee3 = st.columns(3)
