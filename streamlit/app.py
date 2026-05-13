@@ -10,6 +10,13 @@ import types
 from pathlib import Path
 from typing import Any
 
+# Permite importar app_climazon.py da mesma pasta
+_STREAMLIT_DIR = Path(__file__).resolve().parent
+if str(_STREAMLIT_DIR) not in sys.path:
+    sys.path.insert(0, str(_STREAMLIT_DIR))
+
+import app_climazon as _climazon
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -20,22 +27,13 @@ from streamlit_option_menu import option_menu
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 PREDICT_ROOT = ROOT_DIR / "data" / "processed" / "elgin" / "predict"
-FEATURE_IMPACT_CSV = (
-    ROOT_DIR
-    / "data"
-    / "processed"
-    / "elgin"
-    / "feature-impact"
-    / "v3"
-    / "feature_correlation_sinistralidade.csv"
-)
 FEATURE_IMPACT_ROOT = ROOT_DIR / "data" / "processed" / "elgin" / "feature-impact"
 FORECAST_ROOT = ROOT_DIR / "data" / "processed" / "elgin" / "forecast"
 RAW_PANEL_PARQUET = (
     ROOT_DIR / "data" / "raw" / "elgin" / "base_analitica" / "painel_sinistralidade_v1.parquet"
 )
 SIMULATION_SIZE = 50_000
-AUTH_EMAIL = "marso@email.com"
+AUTH_EMAIL    = "marso@email.com"
 AUTH_PASSWORD = "1234"
 QUASI_LEAKAGE_HIDE: set[str] = {
     "qtd_eventos_sinistro",
@@ -207,13 +205,10 @@ def list_feature_impact_competencias() -> tuple[Path, list[str]]:
 def load_feature_impact_csv(competencia: str | None = None) -> tuple[pd.DataFrame, str]:
     # Novo formato: vN/<YYYY-MM>/feature_correlation_sinistralidade.csv
     ver_dir, comps = list_feature_impact_competencias()
-    if comps:
-        comp_sel = competencia if competencia in comps else comps[-1]
-        csv_path = ver_dir / comp_sel / "feature_correlation_sinistralidade.csv"
-    else:
-        # Fallback legado (v3 único CSV)
-        comp_sel = "legado"
-        csv_path = FEATURE_IMPACT_CSV
+    if not comps:
+        raise FileNotFoundError(f"Nenhuma competência encontrada em {ver_dir}")
+    comp_sel = competencia if competencia in comps else comps[-1]
+    csv_path = ver_dir / comp_sel / "feature_correlation_sinistralidade.csv"
 
     if not csv_path.is_file():
         raise FileNotFoundError(f"Arquivo nao encontrado: {csv_path}")
@@ -1066,40 +1061,87 @@ def render_forecast_tab() -> None:
     st.dataframe(summary, hide_index=True, width="stretch")
 
 
+_COMPANY_CARD = """
+<div style="
+  border: 2px solid {border};
+  border-radius: 16px;
+  padding: 2rem 1.5rem;
+  text-align: center;
+  background: {bg};
+  min-height: 140px;
+  display: flex; flex-direction: column; justify-content: center; gap: 0.5rem;
+">
+  <div style="font-size:1.9rem;font-weight:800;color:{color};letter-spacing:1px;">{name}</div>
+  <div style="font-size:0.95rem;color:#666;">{desc}</div>
+</div>
+"""
+
+
+def render_company_selector() -> None:
+    st.title("PIAM — Inteligência Analítica · Marso")
+    st.markdown("Selecione a empresa que deseja analisar.")
+    st.markdown("---")
+
+    col1, col2 = st.columns(2, gap="large")
+
+    with col1:
+        st.markdown(
+            _COMPANY_CARD.format(
+                border="#1565c0", bg="#f0f4ff", color="#1565c0",
+                name="ELGIN", desc="Carteira de beneficiários Elgin",
+            ),
+            unsafe_allow_html=True,
+        )
+        if st.button("Acessar Elgin", use_container_width=True, type="primary", key="btn_elgin"):
+            st.session_state["selected_company"] = "elgin"
+            st.rerun()
+
+    with col2:
+        st.markdown(
+            _COMPANY_CARD.format(
+                border="#2e7d32", bg="#f0f7f0", color="#2e7d32",
+                name="CLIMAZON", desc="Carteira de beneficiários Climazon",
+            ),
+            unsafe_allow_html=True,
+        )
+        if st.button("Acessar Climazon", use_container_width=True, type="primary", key="btn_climazon"):
+            st.session_state["selected_company"] = "climazon"
+            st.rerun()
+
+
 def main() -> None:
-    st.set_page_config(page_title="Elgin - Analises", layout="wide")
+    st.set_page_config(page_title="PIAM — Marso Analytics", layout="wide")
 
     if not require_login():
         return
 
-    st.title("PIAM - Inteligência Analítica")
+    # Seleção de empresa
+    if not st.session_state.get("selected_company"):
+        render_company_selector()
+        return
+
+    company      = st.session_state["selected_company"]
     profile_name = st.session_state.get("authenticated_user", AUTH_EMAIL)
+    company_label = "ELGIN" if company == "elgin" else "CLIMAZON"
+    nav_color     = "#ff4757" if company == "elgin" else "#1565c0"
+
+    st.title(f"PIAM — Inteligência Analítica · {company_label}")
+
     st.markdown(
         """
 <style>
 [data-testid="stSidebar"] .piam-footer {
-    position: sticky;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    margin-top: 1rem;
-    padding: 0.65rem 0 0.25rem 0;
-    border-top: 1px solid #b8bcc3;
-    background: transparent;
+    position: sticky; bottom: 0; left: 0; right: 0;
+    margin-top: 1rem; padding: 0.65rem 0 0.25rem 0;
+    border-top: 1px solid #b8bcc3; background: transparent;
 }
 [data-testid="stSidebar"] .piam-footer .piam-title {
-    font-size: 1.05rem;
-    font-weight: 700;
-    color: #1f2a44;
-    margin-bottom: 0.25rem;
+    font-size: 1.05rem; font-weight: 700; color: #1f2a44; margin-bottom: 0.25rem;
 }
 [data-testid="stSidebar"] .piam-footer .piam-profile {
-    font-size: 0.9rem;
-    color: #6b7280;
+    font-size: 0.9rem; color: #6b7280;
 }
-[data-testid="stSidebar"][aria-expanded="false"] .piam-footer {
-    display: none;
-}
+[data-testid="stSidebar"][aria-expanded="false"] .piam-footer { display: none; }
 </style>
 """,
         unsafe_allow_html=True,
@@ -1108,28 +1150,26 @@ def main() -> None:
     with st.sidebar:
         menu = option_menu(
             menu_title="Menu",
-            options=["Correlação", "Predição", "Previsão", "Sair"],
-            icons=["bar-chart-line", "activity", "graph-up-arrow", "box-arrow-right"],
+            options=["Correlação", "Predição", "Previsão", "Trocar empresa", "Sair"],
+            icons=["bar-chart-line", "activity", "graph-up-arrow", "arrow-repeat", "box-arrow-right"],
             menu_icon="display",
             default_index=1,
             styles={
                 "container": {"padding": "0!important", "background-color": "transparent"},
                 "icon": {"color": "#5f6368", "font-size": "15px"},
                 "nav-link": {
-                    "font-size": "14px",
-                    "text-align": "left",
-                    "margin": "0px",
-                    "padding": "10px 10px",
+                    "font-size": "14px", "text-align": "left",
+                    "margin": "0px", "padding": "10px 10px",
                     "--hover-color": "#f2f3f5",
                 },
-                "nav-link-selected": {"background-color": "#ff4757", "color": "white"},
+                "nav-link-selected": {"background-color": nav_color, "color": "white"},
                 "menu-title": {"font-size": "20px", "font-weight": "700", "padding": "0px 6px 8px 6px"},
             },
         )
         st.markdown(
             f"""
 <div class="piam-footer">
-  <div class="piam-title">PIAM</div>
+  <div class="piam-title">PIAM · {company_label}</div>
   <div class="piam-profile">Perfil: {profile_name}</div>
 </div>
 """,
@@ -1137,15 +1177,27 @@ def main() -> None:
         )
 
     if menu == "Sair":
-        st.session_state.pop("authenticated_user", None)
+        st.session_state.clear()
         st.rerun()
 
-    if menu == "Predição":
-        render_prediction_tab()
-    elif menu == "Correlação":
-        render_feature_impact_tab()
-    else:
-        render_forecast_tab()
+    if menu == "Trocar empresa":
+        st.session_state.pop("selected_company", None)
+        st.rerun()
+
+    if company == "elgin":
+        if menu == "Predição":
+            render_prediction_tab()
+        elif menu == "Correlação":
+            render_feature_impact_tab()
+        else:
+            render_forecast_tab()
+    else:  # climazon
+        if menu == "Predição":
+            _climazon.render_predicao_tab()
+        elif menu == "Correlação":
+            _climazon.render_correlacao_tab()
+        else:
+            _climazon.render_previsao_tab()
 
 
 if __name__ == "__main__":

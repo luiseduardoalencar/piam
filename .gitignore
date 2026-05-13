@@ -35,13 +35,23 @@ outputs/
 *.pkl
 *.joblib
 
-# IDEs
+# IDEs / agente
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .cursor/
+.claude/
+
+# Documentação interna (não necessária para a aplicação)
+docs/
+MANUAL.md
+RELATORIO_ESTUDOS.md
+
+# Testes e scripts auxiliares de desenvolvimento (não necessários para a aplicação)
+test_mlflow.py
+test_what_if_climazon.py
 # OS
 .DS_Store
 Thumbs.db
@@ -74,7 +84,7 @@ data/processed/elgin/feature-impact/v5/*
 data/processed/elgin/feature-impact/v5/*/*
 !data/processed/elgin/feature-impact/v5/*/*.csv
 
-# Previsão (forecast): só o CSV da versão publicada (ajuste v2 se mudar).
+# Previsão (forecast): só o CSV da versão publicada (ajuste se mudar).
 data/processed/elgin/forecast/*
 !data/processed/elgin/forecast/v2/
 data/processed/elgin/forecast/v2/*
@@ -107,6 +117,62 @@ data/processed/elgin/predict/v20/what_if_mensal/*
 !data/auxiliar/
 !data/auxiliar/elgin/
 !data/auxiliar/elgin/feature_catalog.csv
+
+# ── CLIMAZON ────────────────────────────────────────────────────────────────
+
+!data/processed/climazon/
+
+# Correlação: só os CSVs por plano da versão mais recente (v3).
+# Versões anteriores e subpastas mensais são ignoradas.
+!data/processed/climazon/feature_impact/
+data/processed/climazon/feature_impact/*
+!data/processed/climazon/feature_impact/v3/
+data/processed/climazon/feature_impact/v3/*
+!data/processed/climazon/feature_impact/v3/MASTER_EMPRESARIAL/
+data/processed/climazon/feature_impact/v3/MASTER_EMPRESARIAL/*
+!data/processed/climazon/feature_impact/v3/MASTER_EMPRESARIAL/corr_rank_spearman_vs_target_MASTER_EMPRESARIAL.csv
+!data/processed/climazon/feature_impact/v3/MASTER_EXECUTIVO/
+data/processed/climazon/feature_impact/v3/MASTER_EXECUTIVO/*
+!data/processed/climazon/feature_impact/v3/MASTER_EXECUTIVO/corr_rank_spearman_vs_target_MASTER_EXECUTIVO.csv
+
+# Predição: só v6 (ajuste ao publicar novo treino).
+!data/processed/climazon/predict/
+data/processed/climazon/predict/*
+!data/processed/climazon/predict/v6/
+data/processed/climazon/predict/v6/*
+!data/processed/climazon/predict/v6/catalogo_features_intervencao.json
+!data/processed/climazon/predict/v6/models/
+data/processed/climazon/predict/v6/models/*
+!data/processed/climazon/predict/v6/models/*.pkl
+!data/processed/climazon/predict/v6/what_if_mensal/
+data/processed/climazon/predict/v6/what_if_mensal/*
+!data/processed/climazon/predict/v6/what_if_mensal/resultado_what_if.json
+
+# Forecast: só os CSVs de v4 — modelos (.keras, .npy, .pkl) e imagens ficam fora.
+!data/processed/climazon/forecast/
+data/processed/climazon/forecast/*
+!data/processed/climazon/forecast/v4/
+data/processed/climazon/forecast/v4/*
+!data/processed/climazon/forecast/v4/MASTER_EMPRESARIAL/
+data/processed/climazon/forecast/v4/MASTER_EMPRESARIAL/*
+!data/processed/climazon/forecast/v4/MASTER_EMPRESARIAL/sinistralidade_forecast_completo.csv
+!data/processed/climazon/forecast/v4/MASTER_EXECUTIVO/
+data/processed/climazon/forecast/v4/MASTER_EXECUTIVO/*
+!data/processed/climazon/forecast/v4/MASTER_EXECUTIVO/sinistralidade_forecast_completo.csv
+!data/processed/climazon/forecast/v4/consolidado/
+data/processed/climazon/forecast/v4/consolidado/*
+!data/processed/climazon/forecast/v4/consolidado/sinistralidade_forecast_completo.csv
+
+# Painel processado (parquet) — necessário para Predição e Correlação.
+!data/processed/climazon/base_analitica_transformada/
+data/processed/climazon/base_analitica_transformada/*
+!data/processed/climazon/base_analitica_transformada/painel_sinistralidade_climazon_v1.parquet
+
+# Catálogo de features Climazon
+!data/auxiliar/climazon/
+!data/auxiliar/climazon/feature_catalog.csv
+
+# ── FIM CLIMAZON ─────────────────────────────────────────────────────────────
 
 # Ficheiros temporários locais (não enviar ao remoto)
 /tmp_interv.json

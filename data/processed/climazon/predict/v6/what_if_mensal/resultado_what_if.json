@@ -1,0 +1,38 @@
+{
+  "company": "climazon",
+  "versao": "v6",
+  "data_execucao": "2026-05-11 12:10",
+  "competencia_referencia": "2025-10",
+  "planos_alvo": [
+    "MASTER EMPRESARIAL"
+  ],
+  "feature_intervencionada": "qtd_conta_ambulatorial",
+  "delta_pct_aplicado": -34.0,
+  "modo_idade": "simples",
+  "intervencoes": [
+    {
+      "feature": "qtd_conta_ambulatorial",
+      "delta_pct": -34.0
+    }
+  ],
+  "por_plano": [
+    {
+      "plano": "MASTER EMPRESARIAL",
+      "n_individuos_total": 2116,
+      "n_individuos_afetados": 531,
+      "pct_base_afetada": 25.09,
+      "sinistralidade_antes": 0.6555889673018971,
+      "sinistralidade_depois": 0.655292610615242,
+      "delta_absoluto": -0.00029635668665506376,
+      "delta_relativo_pct": -0.04520464825311684
+    }
+  ],
+  "plano": "MASTER EMPRESARIAL",
+  "n_individuos_total": 2116,
+  "n_individuos_afetados": 531,
+  "pct_base_afetada": 25.09,
+  "sinistralidade_antes": 0.6555889673018971,
+  "sinistralidade_depois": 0.655292610615242,
+  "delta_absoluto": -0.00029635668665506376,
+  "delta_relativo_pct": -0.04520464825311684
+}

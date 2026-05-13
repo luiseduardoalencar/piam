@@ -1,0 +1,285 @@
+{
+  "versao_pasta": "v6",
+  "company": "climazon",
+  "competencia_referencia": "2025-10",
+  "n_total_base_mes": 2166,
+  "n_features_intervencionaveis": 33,
+  "grupos": [
+    {
+      "grupo": "demografico",
+      "n_features": 1,
+      "features": [
+        {
+          "feature": "idade",
+          "categoria": "demografico",
+          "dtype_catalogo": "numeric",
+          "n_elegiveis_delta_positivo": 1907,
+          "n_elegiveis_delta_negativo": 2131,
+          "pct_base_elegivel_delta_positivo": 88.04
+        }
+      ]
+    },
+    {
+      "grupo": "utilizacao",
+      "n_features": 32,
+      "features": [
+        {
+          "feature": "pct_urgencia",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "numeric",
+          "n_elegiveis_delta_positivo": 1945,
+          "n_elegiveis_delta_negativo": 308,
+          "pct_base_elegivel_delta_positivo": 89.8
+        },
+        {
+          "feature": "qtd_conta_ambulatorial",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 1624,
+          "n_elegiveis_delta_negativo": 542,
+          "pct_base_elegivel_delta_positivo": 74.98
+        },
+        {
+          "feature": "qtd_conta_eletivo",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 0,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_conta_externo",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 1877,
+          "n_elegiveis_delta_negativo": 289,
+          "pct_base_elegivel_delta_positivo": 86.66
+        },
+        {
+          "feature": "qtd_conta_internado",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 18,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_conta_na",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 0,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_conta_pronto_socorro",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 1860,
+          "n_elegiveis_delta_negativo": 306,
+          "pct_base_elegivel_delta_positivo": 85.87
+        },
+        {
+          "feature": "qtd_conta_urgencia_emergencia",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 0,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_esp_cardio",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 35,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_esp_cirurg",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 17,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_esp_clin_geral",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 1904,
+          "n_elegiveis_delta_negativo": 691,
+          "pct_base_elegivel_delta_positivo": 87.9
+        },
+        {
+          "feature": "qtd_esp_derm",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 0,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_esp_lab_imagem",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 1923,
+          "n_elegiveis_delta_negativo": 335,
+          "pct_base_elegivel_delta_positivo": 88.78
+        },
+        {
+          "feature": "qtd_esp_neuro",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 2,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_esp_oftal",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 4,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_esp_outros",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 133,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_ACUPUNTURA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 13,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_CIRURGICO",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 17,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_CLÍNICO",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 31,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_CONSULTA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 1904,
+          "n_elegiveis_delta_negativo": 691,
+          "pct_base_elegivel_delta_positivo": 87.9
+        },
+        {
+          "feature": "qtd_servico_DIÁRIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 7,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_ENDOSCOPIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 8,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_FISIOTERAPIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 28,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_HEMODIÁLISE",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 0,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_LABORATÓRIO",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 188,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_QUIMIOTERAPIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 2,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_RADIOLOGIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 109,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_RESSONÂNCIA MAGNÉTICA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 11,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_TERAPIAS COMPLEMENTARES",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 71,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_TOMOGRAFIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 32,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico_ULTRA-SONOGRAFIA",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 151,
+          "pct_base_elegivel_delta_positivo": 0.0
+        },
+        {
+          "feature": "qtd_servico___OUTROS__",
+          "categoria": "utilizacao",
+          "dtype_catalogo": "count",
+          "n_elegiveis_delta_positivo": 0,
+          "n_elegiveis_delta_negativo": 66,
+          "pct_base_elegivel_delta_positivo": 0.0
+        }
+      ]
+    }
+  ]
+}
