@@ -61,6 +61,25 @@ PREMIUM_COL              = pc.PREMIUM_COL
 BENEFICIARIO_COL         = pc.BENEFICIARIO_COL
 PLANOS_CANONICOS         = pc.PLANOS_CANONICOS
 
+# Correlações de features com envelhecimento, aplicadas apenas quando
+# modo_idade == "correlacionado". Pesos derivados do Spearman observado entre
+# `idade` e cada feature na própria base da Climazon (média entre planos
+# MASTER_EMPRESARIAL e MASTER_EXECUTIVO), com filtros: correlação positiva em
+# ambos os planos, |spearman_médio| >= 0,10, feature elegível para modelagem.
+# Fonte: data/processed/climazon/feature_impact/v3/{plano}/corr_long_{plano}.csv
+# Peso: 0,0 = sem efeito; 1,0 = proporcional ao delta de idade.
+CORRELACOES_ENVELHECIMENTO: dict[str, float] = {
+    "qtd_servico_ULTRA-SONOGRAFIA":     0.28,
+    "qtd_esp_cardio":                   0.19,
+    "qtd_servico_FISIOTERAPIA":         0.18,
+    "qtd_esp_cirurg":                   0.16,
+    "qtd_conta_externo":                0.16,
+    "qtd_servico_RESSONÂNCIA MAGNÉTICA": 0.15,
+    "qtd_servico_TOMOGRAFIA":           0.15,
+    "qtd_conta_eletivo":                0.14,
+    "qtd_servico_LABORATÓRIO":          0.12,
+}
+
 
 # =============================================================================
 # %% — Utilitários
@@ -161,13 +180,12 @@ def _run_what_if_plano(
     df_int = df_seg.copy()
 
     if feature == "idade" and modo_idade == "correlacionado":
-        # Efeitos secundários correlacionados com envelhecimento
-        for col_sec, peso in [("pct_urgencia", 0.3), ("qtd_conta_pronto_socorro", 0.2)]:
+        for col_sec, peso in CORRELACOES_ENVELHECIMENTO.items():
             if col_sec in df_int.columns:
                 df_int.loc[elegiveis, col_sec] = (
                     pd.to_numeric(df_int.loc[elegiveis, col_sec], errors="coerce").fillna(0)
                     * (1 + delta_pct / 100 * peso)
-                )
+                ).clip(lower=0.0)
 
     if feature in df_int.columns:
         df_int.loc[elegiveis, feature] = (
