@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import contextlib
+import html
 import json
 import os
 import re
@@ -64,6 +65,32 @@ def _fmt_sinistralidade_index_pct(value: Any, *, nd: int = 2) -> str:
     if np.isnan(x):
         return "-"
     return f"{x * 100.0:.{nd}f}%"
+
+
+def _colored_metric(container, label: str, value: str, *, is_good: bool, help_text: str = "") -> None:
+    """
+    Métrica com o big number colorido. Verde quando is_good=True (queda na sinistralidade),
+    vermelho caso contrário. Tooltip nativo do navegador via atributo HTML title.
+    """
+    color = "#2e7d32" if is_good else "#c62828"
+    info_html = (
+        f'<span title="{html.escape(help_text)}" '
+        f'style="color:#9aa0a6;cursor:help;margin-left:6px;font-size:0.85rem;">ⓘ</span>'
+        if help_text else ""
+    )
+    container.markdown(
+        f"""
+<div style="margin-bottom:1rem;">
+  <div style="font-size:0.875rem;color:rgba(49,51,63,0.6);line-height:1.2;padding-bottom:4px;">
+    {html.escape(label)}{info_html}
+  </div>
+  <div style="font-size:2.25rem;font-weight:700;color:{color};line-height:1.2;">
+    {html.escape(value)}
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def require_login() -> bool:
@@ -363,32 +390,35 @@ def render_calibracao_mes_section(
         return
 
     st.markdown("### Calibração do mês")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Competência", str(kpi_mes.get("competencia_referencia", "-")))
-    c2.metric(
-        "Sinistralidade ajustada (mês)",
-        _fmt_sinistralidade_index_pct(real_mes),
-        help="Índice do mês (sinistros ajustados ÷ faturamento). Valor ×100 em %.",
-    )
 
     if baseline_predito is None or np.isnan(float(baseline_predito)):
-        c3.metric("Baseline predito (modelo)", "-")
-        c4.metric("Gap calibração", "-")
-        st.caption("Execute uma simulação para atualizar o baseline predito do mês.")
+        st.metric(
+            "Sinistralidade prevista pelo modelo",
+            "-",
+            help=(
+                "O que o modelo estima para o mês atual, em %. "
+                f"Sinistralidade real do mês: {_fmt_sinistralidade_index_pct(real_mes)}. "
+                "Erro do modelo: ainda não disponível (execute uma simulação)."
+            ),
+        )
+        st.caption("Execute uma simulação para atualizar a previsão do modelo para o mês.")
         return
 
     pred_mes = float(baseline_predito)
     gap_abs = pred_mes - real_mes
     gap_rel = (gap_abs / real_mes * 100.0) if real_mes != 0 else float("nan")
-    c3.metric(
-        "Baseline predito (modelo)",
-        _fmt_sinistralidade_index_pct(pred_mes),
-        help="Índice previsto pelo modelo (mesma escala; ×100 em %).",
+    erro_text = (
+        f"{gap_rel:+.2f}% (positivo = modelo superestimou; negativo = subestimou)"
+        if not np.isnan(gap_rel) else "indisponível"
     )
-    c4.metric(
-        "Gap calibração",
-        f"{gap_rel:+.2f}%",
-        help="Erro relativo do baseline face ao real: (predito − real) / real.",
+    st.metric(
+        "Sinistralidade prevista pelo modelo",
+        _fmt_sinistralidade_index_pct(pred_mes),
+        help=(
+            "O que o modelo estima para o mês atual, em %. "
+            f"Sinistralidade real do mês: {_fmt_sinistralidade_index_pct(real_mes)}. "
+            f"Erro do modelo: {erro_text}."
+        ),
     )
     st.caption(
         f"Diferença em pontos percentuais (predito − real): **{gap_abs * 100.0:+.2f} p.p.**"
@@ -676,17 +706,25 @@ def render_prediction_tab() -> None:
         kpi = load_kpi_mes_atual()
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Competência de referência", kpi["competencia_referencia"])
-        k2.metric(
-            "Sinistralidade ajustada (mês)",
-            _fmt_sinistralidade_index_pct(kpi.get("sinistralidade_ajustada_mes")),
-            help="Índice do mês (sinistros ajustados ÷ faturamento). Valor ×100 em %.",
+        k1.metric(
+            "Mês de referência",
+            kpi["competencia_referencia"],
+            help="Mês mais recente disponível na base de dados.",
         )
-        k3.metric("Vidas no mês", f"{int(kpi['n_vidas_mes']):,}")
-        k4.metric("Faturamento do mês", f"{float(kpi['faturamento_mes']):,.2f}")
-        st.caption(
-            "**Sinistralidade ajustada:** índice sinistros ajustados ÷ faturamento do mês; "
-            "os números acima estão em **%** (índice × 100)."
+        k2.metric(
+            "Sinistralidade real do mês",
+            _fmt_sinistralidade_index_pct(kpi.get("sinistralidade_ajustada_mes")),
+            help="O que de fato aconteceu no mês: total de sinistros pagos dividido pelo total faturado, em %.",
+        )
+        k3.metric(
+            "Beneficiários no mês",
+            f"{int(kpi['n_vidas_mes']):,}",
+            help="Total de beneficiários ativos no mês de referência.",
+        )
+        k4.metric(
+            "Faturamento do mês",
+            f"R$ {float(kpi['faturamento_mes']):,.2f}",
+            help="Soma do prêmio (valor faturado) de todos os beneficiários no mês.",
         )
     except Exception as e:
         st.warning(f"Não foi possível carregar KPI mensal da base raw: {e}")
@@ -747,10 +785,10 @@ def render_prediction_tab() -> None:
 
     b_exec, b_clear = st.columns(2)
     with b_exec:
-        run_clicked = st.button("Executar inferência what-if", type="primary", use_container_width=True)
+        run_clicked = st.button("Executar simulação", type="primary", use_container_width=True)
     with b_clear:
         clear_clicked = st.button(
-            "Limpar última inferência",
+            "Limpar resultado",
             type="secondary",
             use_container_width=True,
             help="Remove da sessão o painel de resultados e o baseline predito na calibração até nova execução.",
@@ -781,9 +819,9 @@ def render_prediction_tab() -> None:
         out = str(st.session_state.get("pred_features_last_output", ""))
         last_ver = str(st.session_state.get("pred_features_last_version", version_label))
         if ok:
-            st.success("Inferência executada com sucesso.")
+            st.success("Simulação executada com sucesso.")
         else:
-            st.error("Falha ao executar inferência.")
+            st.error("Falha ao executar simulação.")
 
         what_if_dir = PREDICT_ROOT / last_ver / "what_if_mensal"
         resultado_path = what_if_dir / "resultado_what_if.json"
@@ -806,27 +844,51 @@ def render_prediction_tab() -> None:
             st.subheader("Resultado da Simulação")
             rr1, rr2, rr3, rr4 = st.columns(4)
             rr1.metric(
-                "Sinistralidade antes",
+                "Sinistralidade antes da simulação",
                 _fmt_sinistralidade_index_pct(resultado.get("sinistralidade_antes", 0.0)),
-                help="Índice macro antes da intervenção (×100 em %).",
+                help="Índice de sinistralidade que o modelo prevê para o mês atual, sem aplicar a intervenção.",
             )
             rr2.metric(
-                "Sinistralidade depois",
+                "Sinistralidade depois da simulação",
                 _fmt_sinistralidade_index_pct(resultado.get("sinistralidade_depois", 0.0)),
-                help="Índice macro depois da intervenção (×100 em %).",
+                help="Índice de sinistralidade que o modelo prevê após aplicar a intervenção escolhida.",
             )
             d_abs = float(resultado.get("delta_absoluto", 0.0))
-            rr3.metric(
-                "Delta (p.p.)",
+            d_rel = float(resultado.get("delta_relativo_pct", 0.0))
+            _colored_metric(
+                rr3,
+                "Variação no índice",
                 f"{d_abs * 100.0:+.2f} p.p.",
-                help="Variação do índice em pontos percentuais (diferença das taxas × 100).",
+                is_good=(d_abs <= 0),
+                help_text=(
+                    "Diferença bruta entre depois e antes, em pontos percentuais (p.p.). "
+                    "Verde = sinistralidade caiu; vermelho = subiu. "
+                    "Exemplo: se a sinistralidade caiu de 100% para 95%, a variação é -5 p.p."
+                ),
             )
-            rr4.metric("Delta relativo", f"{float(resultado.get('delta_relativo_pct', 0.0)):+.4f}%")
+            _colored_metric(
+                rr4,
+                "Variação proporcional",
+                f"{d_rel:+.2f}%",
+                is_good=(d_rel <= 0),
+                help_text=(
+                    "Quanto a sinistralidade caiu ou subiu em termos relativos: "
+                    "(depois − antes) ÷ antes × 100. Verde = sinistralidade caiu; vermelho = subiu. "
+                    "Exemplo: cair de 100% para 95% representa -5% de redução proporcional."
+                ),
+            )
 
-            ee1, ee2, ee3 = st.columns(3)
-            ee1.metric("Usuários afetados", f"{int(resultado.get('n_individuos_afetados', 0)):,}")
-            ee2.metric("Usuários não elegíveis", f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}")
-            ee3.metric("Versão do modelo", str(resultado.get("versao_modelo", last_ver)))
+            ee1, ee2 = st.columns(2)
+            ee1.metric(
+                "Beneficiários afetados",
+                f"{int(resultado.get('n_individuos_afetados', 0)):,}",
+                help="Quantidade de beneficiários elegíveis à intervenção, ou seja, que tiveram a feature modificada na simulação.",
+            )
+            ee2.metric(
+                "Beneficiários fora do escopo",
+                f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}",
+                help="Beneficiários que não atendem à regra de elegibilidade da intervenção e portanto não tiveram seus valores alterados.",
+            )
 
             st.markdown("**Explicabilidade da intervenção**")
             intervs = resultado.get("intervencoes", [])
@@ -1061,56 +1123,82 @@ def render_forecast_tab() -> None:
     st.dataframe(summary, hide_index=True, width="stretch")
 
 
-_COMPANY_CARD = """
-<div style="
-  border: 2px solid {border};
-  border-radius: 16px;
-  padding: 2rem 1.5rem;
-  text-align: center;
-  background: {bg};
-  min-height: 140px;
-  display: flex; flex-direction: column; justify-content: center; gap: 0.5rem;
-">
-  <div style="font-size:1.9rem;font-weight:800;color:{color};letter-spacing:1px;">{name}</div>
-  <div style="font-size:0.95rem;color:#666;">{desc}</div>
-</div>
+_COMPANY_CARDS_CSS = """
+<style>
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"] button[kind="secondary"] {
+    border-radius: 16px !important;
+    min-height: 160px !important;
+    padding: 2.2rem 1.5rem !important;
+    font-size: 1.05rem !important;
+    font-weight: 600 !important;
+    line-height: 1.6 !important;
+    white-space: pre-line !important;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease !important;
+}
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"]:nth-of-type(1) button[kind="secondary"] {
+    background: #f0f4ff !important;
+    border: 2px solid #1565c0 !important;
+    color: #1565c0 !important;
+}
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"]:nth-of-type(1) button[kind="secondary"] p strong {
+    font-size: 1.9rem !important;
+    letter-spacing: 1px !important;
+}
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"]:nth-of-type(1) button[kind="secondary"]:hover {
+    background: #e3ebff !important;
+    border-color: #0d47a1 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(21, 101, 192, 0.22);
+}
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"]:nth-of-type(2) button[kind="secondary"] {
+    background: #f0f7f0 !important;
+    border: 2px solid #2e7d32 !important;
+    color: #2e7d32 !important;
+}
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"]:nth-of-type(2) button[kind="secondary"] p strong {
+    font-size: 1.9rem !important;
+    letter-spacing: 1px !important;
+}
+[data-testid="stHorizontalBlock"] [data-testid="stColumn"]:nth-of-type(2) button[kind="secondary"]:hover {
+    background: #d8e8d8 !important;
+    border-color: #1b5e20 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(46, 125, 50, 0.22);
+}
+</style>
 """
 
 
 def render_company_selector() -> None:
-    st.title("PIAM — Inteligência Analítica · Marso")
+    st.title("Inteligência Analítica PIAM · Marso")
     st.markdown("Selecione a empresa que deseja analisar.")
     st.markdown("---")
+
+    st.markdown(_COMPANY_CARDS_CSS, unsafe_allow_html=True)
 
     col1, col2 = st.columns(2, gap="large")
 
     with col1:
-        st.markdown(
-            _COMPANY_CARD.format(
-                border="#1565c0", bg="#f0f4ff", color="#1565c0",
-                name="ELGIN", desc="Carteira de beneficiários Elgin",
-            ),
-            unsafe_allow_html=True,
-        )
-        if st.button("Acessar Elgin", use_container_width=True, type="primary", key="btn_elgin"):
+        if st.button(
+            "**ELGIN**\n\nCarteira de beneficiários Elgin",
+            use_container_width=True,
+            key="btn_elgin",
+        ):
             st.session_state["selected_company"] = "elgin"
             st.rerun()
 
     with col2:
-        st.markdown(
-            _COMPANY_CARD.format(
-                border="#2e7d32", bg="#f0f7f0", color="#2e7d32",
-                name="CLIMAZON", desc="Carteira de beneficiários Climazon",
-            ),
-            unsafe_allow_html=True,
-        )
-        if st.button("Acessar Climazon", use_container_width=True, type="primary", key="btn_climazon"):
+        if st.button(
+            "**CLIMAZON**\n\nCarteira de beneficiários Climazon",
+            use_container_width=True,
+            key="btn_climazon",
+        ):
             st.session_state["selected_company"] = "climazon"
             st.rerun()
 
 
 def main() -> None:
-    st.set_page_config(page_title="PIAM — Marso Analytics", layout="wide")
+    st.set_page_config(page_title="PIAM Analytics · Marso", layout="wide")
 
     if not require_login():
         return
@@ -1125,7 +1213,7 @@ def main() -> None:
     company_label = "ELGIN" if company == "elgin" else "CLIMAZON"
     nav_color     = "#ff4757" if company == "elgin" else "#1565c0"
 
-    st.title(f"PIAM — Inteligência Analítica · {company_label}")
+    st.title(f"Inteligência Analítica PIAM · {company_label}")
 
     st.markdown(
         """
@@ -1153,7 +1241,7 @@ def main() -> None:
             options=["Correlação", "Predição", "Previsão", "Trocar empresa", "Sair"],
             icons=["bar-chart-line", "activity", "graph-up-arrow", "arrow-repeat", "box-arrow-right"],
             menu_icon="display",
-            default_index=1,
+            default_index=0,
             styles={
                 "container": {"padding": "0!important", "background-color": "transparent"},
                 "icon": {"color": "#5f6368", "font-size": "15px"},

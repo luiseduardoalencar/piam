@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -86,6 +87,32 @@ def _fmt_pct(value: Any, nd: int = 2) -> str:
     if np.isnan(x):
         return "-"
     return f"{x * 100.0:.{nd}f}%"
+
+
+def _colored_metric(container, label: str, value: str, *, is_good: bool, help_text: str = "") -> None:
+    """
+    Métrica com o big number colorido. Verde quando is_good=True (queda na sinistralidade),
+    vermelho caso contrário. Tooltip nativo do navegador via atributo HTML title.
+    """
+    color = "#2e7d32" if is_good else "#c62828"
+    info_html = (
+        f'<span title="{html.escape(help_text)}" '
+        f'style="color:#9aa0a6;cursor:help;margin-left:6px;font-size:0.85rem;">ⓘ</span>'
+        if help_text else ""
+    )
+    container.markdown(
+        f"""
+<div style="margin-bottom:1rem;">
+  <div style="font-size:0.875rem;color:rgba(49,51,63,0.6);line-height:1.2;padding-bottom:4px;">
+    {html.escape(label)}{info_html}
+  </div>
+  <div style="font-size:2.25rem;font-weight:700;color:{color};line-height:1.2;">
+    {html.escape(value)}
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _sinistralidade_status(valor: float) -> tuple[str, str]:
@@ -189,7 +216,7 @@ def load_feature_impact(plano: str | None, competencia: str | None = None) -> tu
         df["abs_spearman"] = df["spearman"].abs()
         return df.sort_values("abs_spearman", ascending=False).reset_index(drop=True), plano
 
-    # Todos os planos — por competência
+    # Todos os planos, por competência
     comps = sorted(
         [p.name for p in ver_dir.iterdir() if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}", p.name)],
     )
@@ -302,7 +329,7 @@ def _run_what_if_subprocess(
 
 def render_correlacao_tab() -> None:
     st.header("Correlação")
-    st.caption("Ranking Spearman — impacto das features na sinistralidade.")
+    st.caption("Ranking Spearman do impacto das features na sinistralidade.")
 
     plano_sel = st.selectbox("Plano", options=PLANOS_CANONICOS, key="corr_plano")
 
@@ -366,17 +393,33 @@ def render_correlacao_tab() -> None:
 
 
 def render_predicao_tab() -> None:
-    st.header("Predição — Simulação What-If")
+    st.header("Predição por features")
     st.caption("Simule o impacto de alterar a frequência de um comportamento na sinistralidade agregada.")
 
     kpi: dict[str, Any] | None = None
     try:
         kpi = load_kpi_mes_atual()
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Competência de referência", kpi["competencia_referencia"])
-        k2.metric("Sinistralidade ponderada (mês)", _fmt_pct(kpi["sinistralidade_mes"]))
-        k3.metric("Vidas no mês", f"{int(kpi['n_vidas_mes']):,}")
-        k4.metric("Faturamento do mês", f"R$ {float(kpi['faturamento_mes']):,.0f}")
+        k1.metric(
+            "Mês de referência",
+            kpi["competencia_referencia"],
+            help="Mês mais recente disponível na base de dados.",
+        )
+        k2.metric(
+            "Sinistralidade real do mês",
+            _fmt_pct(kpi["sinistralidade_mes"]),
+            help="O que de fato aconteceu no mês: total de sinistros pagos dividido pelo total faturado, em %.",
+        )
+        k3.metric(
+            "Beneficiários no mês",
+            f"{int(kpi['n_vidas_mes']):,}",
+            help="Total de beneficiários ativos no mês de referência.",
+        )
+        k4.metric(
+            "Faturamento do mês",
+            f"R$ {float(kpi['faturamento_mes']):,.0f}",
+            help="Soma do prêmio (valor faturado) de todos os beneficiários no mês.",
+        )
     except Exception as e:
         st.warning(f"Não foi possível carregar KPI mensal: {e}")
 
@@ -399,15 +442,20 @@ def render_predicao_tab() -> None:
     if baseline_inicial is not None and not np.isnan(baseline_inicial):
         real_val = float((kpi or {}).get("sinistralidade_mes", float("nan")))
         st.markdown("### Calibração do mês")
-        cb1, cb2, cb3, cb4 = st.columns(4)
-        cb1.metric("Competência ref.", comp_ref)
-        cb2.metric("Sinistralidade real (mês)", _fmt_pct(real_val))
-        cb3.metric("Baseline previsto (modelo)", _fmt_pct(baseline_inicial))
         if not np.isnan(real_val) and real_val != 0:
             gap = (baseline_inicial - real_val) / real_val * 100.0
-            cb4.metric("Gap calibração", f"{gap:+.2f}%")
+            erro_text = f"{gap:+.2f}% (positivo = modelo superestimou; negativo = subestimou)"
         else:
-            cb4.metric("Gap calibração", "-")
+            erro_text = "indisponível (sinistralidade real do mês é zero ou ausente)"
+        st.metric(
+            "Sinistralidade prevista pelo modelo",
+            _fmt_pct(baseline_inicial),
+            help=(
+                "O que o modelo estima para o mês atual, em %. "
+                f"Sinistralidade real do mês: {_fmt_pct(real_val)}. "
+                f"Erro do modelo: {erro_text}."
+            ),
+        )
 
     # ---- controles ----
     plano_sel = st.selectbox("Plano", options=PLANOS_CANONICOS, key="pred_plano")
@@ -503,16 +551,52 @@ def render_predicao_tab() -> None:
     if resultado:
         st.subheader("Resultado da Simulação")
         rr1, rr2, rr3, rr4 = st.columns(4)
-        rr1.metric("Sinistralidade antes", _fmt_pct(resultado.get("sinistralidade_antes", 0.0)))
-        rr2.metric("Sinistralidade depois", _fmt_pct(resultado.get("sinistralidade_depois", 0.0)))
+        rr1.metric(
+            "Sinistralidade antes da simulação",
+            _fmt_pct(resultado.get("sinistralidade_antes", 0.0)),
+            help="Índice de sinistralidade que o modelo prevê para o mês atual, sem aplicar a intervenção.",
+        )
+        rr2.metric(
+            "Sinistralidade depois da simulação",
+            _fmt_pct(resultado.get("sinistralidade_depois", 0.0)),
+            help="Índice de sinistralidade que o modelo prevê após aplicar a intervenção escolhida.",
+        )
         d_abs = float(resultado.get("delta_absoluto", 0.0))
-        rr3.metric("Delta (p.p.)", f"{d_abs * 100.0:+.2f} p.p.")
-        rr4.metric("Delta relativo", f"{float(resultado.get('delta_relativo_pct', 0.0)):+.4f}%")
+        d_rel = float(resultado.get("delta_relativo_pct", 0.0))
+        _colored_metric(
+            rr3,
+            "Variação no índice",
+            f"{d_abs * 100.0:+.2f} p.p.",
+            is_good=(d_abs <= 0),
+            help_text=(
+                "Diferença bruta entre depois e antes, em pontos percentuais (p.p.). "
+                "Verde = sinistralidade caiu; vermelho = subiu. "
+                "Exemplo: se a sinistralidade caiu de 100% para 95%, a variação é -5 p.p."
+            ),
+        )
+        _colored_metric(
+            rr4,
+            "Variação proporcional",
+            f"{d_rel:+.2f}%",
+            is_good=(d_rel <= 0),
+            help_text=(
+                "Quanto a sinistralidade caiu ou subiu em termos relativos: "
+                "(depois − antes) ÷ antes × 100. Verde = sinistralidade caiu; vermelho = subiu. "
+                "Exemplo: cair de 100% para 95% representa -5% de redução proporcional."
+            ),
+        )
 
-        ee1, ee2, ee3 = st.columns(3)
-        ee1.metric("Afetados", f"{int(resultado.get('n_individuos_afetados', 0)):,}")
-        ee2.metric("Não elegíveis", f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}")
-        ee3.metric("Versão", str(resultado.get("versao_modelo", last_ver)))
+        ee1, ee2 = st.columns(2)
+        ee1.metric(
+            "Beneficiários afetados",
+            f"{int(resultado.get('n_individuos_afetados', 0)):,}",
+            help="Quantidade de beneficiários elegíveis à intervenção, ou seja, que tiveram a feature modificada na simulação.",
+        )
+        ee2.metric(
+            "Beneficiários fora do escopo",
+            f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}",
+            help="Beneficiários que não atendem à regra de elegibilidade da intervenção e portanto não tiveram seus valores alterados.",
+        )
 
         por_plano = resultado.get("por_plano", [])
         if isinstance(por_plano, list) and len(por_plano) > 1:
@@ -554,7 +638,7 @@ _AVISO_SEM_FORECAST = (
 
 def render_previsao_tab() -> None:
     st.header("Previsão")
-    st.caption("Forecast mensal — LSTM ensemble (MASTER EMPRESARIAL).")
+    st.caption("Forecast mensal (LSTM ensemble, MASTER EMPRESARIAL).")
 
     vers = list_forecast_versions()
     if not vers:
@@ -651,7 +735,7 @@ def render_previsao_tab() -> None:
         ))
 
     fig.update_layout(
-        title=f"Sinistralidade Climazon — {plano_filter} ({ver})",
+        title=f"Sinistralidade Climazon · {plano_filter} ({ver})",
         hovermode="x unified",
         legend_title_text="Período",
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
@@ -687,12 +771,12 @@ def render_previsao_tab() -> None:
 # =============================================================================
 
 def main() -> None:
-    st.set_page_config(page_title="Climazon — PIAM Analytics", layout="wide")
+    st.set_page_config(page_title="PIAM Analytics · Climazon", layout="wide")
 
     if not require_login():
         return
 
-    st.title("PIAM — Inteligência Analítica · Climazon")
+    st.title("Inteligência Analítica PIAM · Climazon")
 
     st.markdown(
         """
