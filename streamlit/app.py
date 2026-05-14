@@ -1036,7 +1036,11 @@ def render_forecast_tab() -> None:
 
     forecast_monthly = (
         forecast_daily.groupby("competencia_mes", as_index=False)
-        .agg(sinistralidade_mensal=("SINISTRALIDADE_PREVISTA", "mean"))
+        .agg(
+            sinistralidade_mensal=("SINISTRALIDADE_PREVISTA", "mean"),
+            sin_min=("SINISTRALIDADE_PREVISTA", "min"),
+            sin_max=("SINISTRALIDADE_PREVISTA", "max"),
+        )
     )
     forecast_monthly["periodo"] = "Previsto"
 
@@ -1047,13 +1051,20 @@ def render_forecast_tab() -> None:
         for col, (_, row) in zip(metric_cols, forecast_monthly.iterrows()):
             value = float(row["sinistralidade_mensal"])
             label, color = _sinistralidade_status(value)
+            sin_min = float(row.get("sin_min", float("nan")))
+            sin_max = float(row.get("sin_max", float("nan")))
+            band_str = (
+                f"Intervalo provável: {sin_min:.2f}% a {sin_max:.2f}%"
+                if not (np.isnan(sin_min) or np.isnan(sin_max)) else ""
+            )
             with col:
                 st.markdown(
                     f"""
 <div style="border:1px solid #e6e6e6;border-radius:12px;padding:1rem;text-align:center;">
   <div style="font-size:0.95rem;font-weight:600;color:#666;">{row["competencia_mes"].strftime("%m/%Y")}</div>
   <div style="font-size:2rem;font-weight:700;color:{color};margin-top:0.35rem;">{value:.2f}%</div>
-  <div style="font-size:0.95rem;font-weight:600;color:{color};margin-top:0.35rem;">{label}</div>
+  <div style="font-size:0.95rem;font-weight:600;color:{color};margin-top:0.25rem;">{label}</div>
+  <div style="font-size:0.78rem;color:#888;margin-top:0.15rem;">{band_str}</div>
 </div>
 """,
                     unsafe_allow_html=True,
@@ -1109,6 +1120,13 @@ def render_forecast_tab() -> None:
     )
     fig.update_yaxes(title="Sinistralidade (%)")
     st.plotly_chart(fig, width="stretch")
+
+    st.info(
+        "O modelo acerta a direção da sinistralidade (se vai subir ou cair) com boa consistência. "
+        "O erro médio é de ~16% (MAPE), ou seja, se a sinistralidade real for 80%, o modelo pode prever "
+        "entre cerca de 67% e 93%. Por isso, usamos o modelo para antecipar tendências e alertar para "
+        "meses de risco, não para substituir o número final do fechamento."
+    )
 
     summary = pd.DataFrame(
         {

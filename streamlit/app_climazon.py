@@ -116,12 +116,17 @@ def _colored_metric(container, label: str, value: str, *, is_good: bool, help_te
 
 
 def _sinistralidade_status(valor: float) -> tuple[str, str]:
-    if valor < 0.80:
-        return "Boa", "#2e7d32"
-    elif valor < 1.00:
-        return "Estável", "#f9a825"
-    else:
-        return "Alta", "#c62828"
+    """
+    Faixas de referência (operadora): aceitável ~70-75%.
+    Recebe valor em escala 0-1 (ratio). Retorna (rótulo, cor CSS).
+    """
+    if valor < 0:
+        return "Valor negativo", "#c62828"
+    if valor < 0.70:
+        return "Boa sinistralidade", "#2e7d32"
+    if valor <= 0.75:
+        return "Estável", "#1565c0"
+    return "Alta sinistralidade", "#c62828"
 
 
 def _format_feature_name(feature: str) -> str:
@@ -686,7 +691,7 @@ def render_previsao_tab() -> None:
             p05 = row.get("forecast_p05", np.nan)
             p95 = row.get("forecast_p95", np.nan)
             ci_str = (
-                f"IC 90%: {float(p05):.1%} – {float(p95):.1%}"
+                f"Intervalo provável: {float(p05):.1%} a {float(p95):.1%}"
                 if not (pd.isna(p05) or pd.isna(p95)) else ""
             )
             with col:
