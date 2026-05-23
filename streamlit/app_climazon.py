@@ -9,6 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Garante que o módulo feature_labels (na mesma pasta) seja importável
+# mesmo quando app_climazon.py é executado diretamente via streamlit.
+_STREAMLIT_DIR = Path(__file__).resolve().parent
+if str(_STREAMLIT_DIR) not in sys.path:
+    sys.path.insert(0, str(_STREAMLIT_DIR))
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -16,6 +22,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
+
+from feature_labels import format_feature_name as _format_feature_name
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(dotenv_path=ROOT_DIR / ".env")
@@ -127,44 +135,6 @@ def _sinistralidade_status(valor: float) -> tuple[str, str]:
     if valor <= 0.75:
         return "Estável", "#1565c0"
     return "Alta sinistralidade", "#c62828"
-
-
-def _format_feature_name(feature: str) -> str:
-    mapping = {
-        "idade": "Idade",
-        "sexo": "Sexo",
-        "tipo_cadastro": "Cadastro",
-        "pct_urgencia": "Pct. urgência",
-        "qtd_servico_CONSULTA": "Qtd. consulta",
-        "qtd_esp_clin_geral": "Clínico geral",
-        "qtd_conta_pronto_socorro": "Pronto socorro",
-        "qtd_esp_outros": "Esp. outros",
-        "qtd_conta_ambulatorial": "Atend. amb.",
-        "qtd_servico_LABORATÓRIO": "Laboratório",
-        "qtd_conta_externo": "Conta externa",
-        "qtd_servico_ULTRA-SONOGRAFIA": "Ultrassom",
-        "qtd_servico_RADIOLOGIA": "Radiologia",
-        "qtd_esp_lab_imagem": "Lab. imagem",
-        "qtd_servico___OUTROS__": "Serv. outros",
-        "qtd_esp_cardio": "Esp. cardio",
-        "qtd_esp_oftal": "Esp. oftalmo",
-        "qtd_esp_neuro": "Esp. neuro",
-        "qtd_servico_TOMOGRAFIA": "Tomografia",
-        "qtd_conta_internado": "Conta internação",
-        "qtd_servico_CIRURGICO": "Serv. cirúrgico",
-        "qtd_servico_FISIOTERAPIA": "Fisioterapia",
-        "valor_faturamento": "Faturamento",
-        "qtd_servico_CLÍNICO": "Serv. clínico",
-        "qtd_conta_urgencia_emergencia": "Urgência/emergência",
-        "qtd_servico_RESSONÂNCIA MAGNÉTICA": "Ressonância",
-        "qtd_servico_QUIMIOTERAPIA": "Quimioterapia",
-        "qtd_servico_HEMODIÁLISE": "Hemodiálise",
-    }
-    if feature in mapping:
-        return mapping[feature]
-    label = feature.replace("tx_", "taxa ").replace("qtd_", "").replace("_", " ").strip()
-    words = [p.capitalize() for p in label.split() if p]
-    return " ".join(words[:3]) if words else feature
 
 
 # =============================================================================
@@ -334,7 +304,7 @@ def _run_what_if_subprocess(
 
 def render_correlacao_tab() -> None:
     st.header("Correlação")
-    st.caption("Ranking Spearman do impacto das features na sinistralidade.")
+    st.caption("Ranking do impacto dos atributos na sinistralidade.")
 
     plano_sel = st.selectbox("Plano", options=PLANOS_CANONICOS, key="corr_plano")
 
@@ -360,17 +330,26 @@ def render_correlacao_tab() -> None:
     df["feature_label"] = df["feature"].map(_format_feature_name)
 
     top_n_max = min(30, len(df))
-    top_n = st.slider("Top N features", min_value=5, max_value=top_n_max, value=min(15, top_n_max))
+    top_n = st.slider("Top N atributos", min_value=5, max_value=top_n_max, value=min(15, top_n_max))
 
-    st.metric("Total de features analisadas", len(df))
+    st.metric(
+        "Atributos da carteira analisados",
+        len(df),
+        help=(
+            "Quantidade de atributos da carteira avaliados quanto à correlação com a sinistralidade. "
+            "Inclui perfil do beneficiário (idade, sexo, cadastro), padrão de utilização do plano "
+            "(consultas, exames, especialidades, internações) e indicadores financeiros (faturamento, urgência)."
+        ),
+    )
     st.caption(f"Referência: **{label}**")
 
     st.dataframe(
         df[["feature_label", "spearman"]].rename(
-            columns={"feature_label": "Feature", "spearman": "Grau de impacto"}
+            columns={"feature_label": "Atributo", "spearman": "Grau de impacto"}
         ),
         hide_index=True,
         use_container_width=True,
+        height=200,
     )
 
     top = df.head(top_n).sort_values("spearman")
@@ -383,8 +362,8 @@ def render_correlacao_tab() -> None:
         orientation="h",
         color="sentido",
         color_discrete_map={"Positivo": "#2e7d32", "Negativo": "#c62828"},
-        title=f"Top {top_n} features por Grau de Impacto",
-        labels={"feature_label": "Feature", "spearman": "Grau de impacto", "sentido": "Impacto"},
+        title=f"Top {top_n} atributos por Grau de Impacto",
+        labels={"feature_label": "Atributo", "spearman": "Grau de impacto", "sentido": "Impacto"},
         hover_data={"feature": True, "feature_label": False, "spearman": ":.4f"},
     )
     fig.update_layout(
@@ -398,7 +377,7 @@ def render_correlacao_tab() -> None:
 
 
 def render_predicao_tab() -> None:
-    st.header("Predição por features")
+    st.header("Predição por atributos")
     st.caption("Simule o impacto de alterar a frequência de um comportamento na sinistralidade agregada.")
 
     kpi: dict[str, Any] | None = None
@@ -436,44 +415,18 @@ def render_predicao_tab() -> None:
     version_label = versions[0]
     comp_ref = kpi["competencia_referencia"] if kpi else "2025-10"
 
-    # ---- baseline calibração ----
-    ultimo_resultado = load_latest_what_if_result(version_label)
-    baseline_inicial: float | None = None
-    if ultimo_resultado and "sinistralidade_antes" in ultimo_resultado:
-        baseline_inicial = float(ultimo_resultado["sinistralidade_antes"])
-    if st.session_state.get("climazon_pred_hide_baseline"):
-        baseline_inicial = None
-
-    if baseline_inicial is not None and not np.isnan(baseline_inicial):
-        real_val = float((kpi or {}).get("sinistralidade_mes", float("nan")))
-        st.markdown("### Calibração do mês")
-        if not np.isnan(real_val) and real_val != 0:
-            gap = (baseline_inicial - real_val) / real_val * 100.0
-            erro_text = f"{gap:+.2f}% (positivo = modelo superestimou; negativo = subestimou)"
-        else:
-            erro_text = "indisponível (sinistralidade real do mês é zero ou ausente)"
-        st.metric(
-            "Sinistralidade prevista pelo modelo",
-            _fmt_pct(baseline_inicial),
-            help=(
-                "O que o modelo estima para o mês atual, em %. "
-                f"Sinistralidade real do mês: {_fmt_pct(real_val)}. "
-                f"Erro do modelo: {erro_text}."
-            ),
-        )
-
     # ---- controles ----
     plano_sel = st.selectbox("Plano", options=PLANOS_CANONICOS, key="pred_plano")
 
     try:
         catalog = load_features_catalog(version_label)
     except Exception as e:
-        st.error(f"Falha ao carregar catálogo de features ({version_label}): {e}")
+        st.error(f"Falha ao carregar catálogo de atributos ({version_label}): {e}")
         return
 
     grupos = catalog.get("grupos", [])
     if not grupos:
-        st.warning("Catálogo sem grupos/features disponíveis.")
+        st.warning("Catálogo sem grupos/atributos disponíveis.")
         return
 
     grupo_nomes = [str(g.get("grupo", "sem_grupo")) for g in grupos]
@@ -482,23 +435,51 @@ def render_predicao_tab() -> None:
 
     features = grupo_obj.get("features", [])
     if not features:
-        st.warning("Grupo sem features disponíveis.")
+        st.warning("Grupo sem atributos disponíveis.")
         return
 
+    try:
+        corr_df, _ = load_feature_impact(plano_sel)
+        corr_map = dict(zip(corr_df["feature"].astype(str), corr_df["abs_spearman"].astype(float)))
+    except Exception:
+        corr_map = {}
+    features = sorted(
+        features,
+        key=lambda f: corr_map.get(str(f.get("feature", "")), 0.0),
+        reverse=True,
+    )[:10]
+
     feat_labels = [
-        f"{_format_feature_name(str(f.get('feature', '')))}  | elegíveis(+): {f.get('n_elegiveis_delta_positivo', 0):,}"
+        f"{_format_feature_name(str(f.get('feature', '')))} — grau de impacto: {corr_map.get(str(f.get('feature', '')), 0.0):.3f}"
         for f in features
     ]
-    feat_idx = st.selectbox(
-        "Feature para intervenção",
-        options=list(range(len(features))),
-        format_func=lambda i: feat_labels[i],
-        key="pred_feat_idx",
-    )
+    col_feats, col_delta, col_big = st.columns([2, 2, 1], gap="medium")
+    with col_feats:
+        feat_idx = st.selectbox(
+            "Atributo para intervenção",
+            options=list(range(len(features))),
+            format_func=lambda i: feat_labels[i],
+            key="pred_feat_idx",
+        )
+    with col_delta:
+        delta_pct = st.slider(
+            "Delta da intervenção (%)",
+            min_value=-90.0,
+            max_value=200.0,
+            value=20.0,
+            step=1.0,
+        )
+    with col_big:
+        st.markdown(
+            f"<div style='text-align:center;padding-top:1.9rem;line-height:1.05;'>"
+            f"<div style='font-size:1.9rem;font-weight:700;color:#1565c0;'>{delta_pct:+.0f}%</div>"
+            f"<div style='font-size:0.72rem;color:#6b7280;margin-top:0.1rem;'>Delta aplicado</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
     feat = features[feat_idx]
     feat_name = str(feat.get("feature"))
 
-    delta_pct = st.slider("Delta da intervenção (%)", min_value=-90.0, max_value=200.0, value=20.0, step=1.0)
 
     modo_idade = "simples"
     if feat_name == "idade":
@@ -555,82 +536,63 @@ def render_predicao_tab() -> None:
 
     if resultado:
         st.subheader("Resultado da Simulação")
-        rr1, rr2, rr3, rr4 = st.columns(4)
-        rr1.metric(
-            "Sinistralidade antes da simulação",
-            _fmt_pct(resultado.get("sinistralidade_antes", 0.0)),
-            help="Índice de sinistralidade que o modelo prevê para o mês atual, sem aplicar a intervenção.",
-        )
-        rr2.metric(
-            "Sinistralidade depois da simulação",
-            _fmt_pct(resultado.get("sinistralidade_depois", 0.0)),
-            help="Índice de sinistralidade que o modelo prevê após aplicar a intervenção escolhida.",
-        )
-        d_abs = float(resultado.get("delta_absoluto", 0.0))
+
         d_rel = float(resultado.get("delta_relativo_pct", 0.0))
-        _colored_metric(
-            rr3,
-            "Variação no índice",
-            f"{d_abs * 100.0:+.2f} p.p.",
-            is_good=(d_abs <= 0),
-            help_text=(
-                "Diferença bruta entre depois e antes, em pontos percentuais (p.p.). "
-                "Verde = sinistralidade caiu; vermelho = subiu. "
-                "Exemplo: se a sinistralidade caiu de 100% para 95%, a variação é -5 p.p."
-            ),
-        )
-        _colored_metric(
-            rr4,
-            "Variação proporcional",
-            f"{d_rel:+.2f}%",
-            is_good=(d_rel <= 0),
-            help_text=(
-                "Quanto a sinistralidade caiu ou subiu em termos relativos: "
-                "(depois − antes) ÷ antes × 100. Verde = sinistralidade caiu; vermelho = subiu. "
-                "Exemplo: cair de 100% para 95% representa -5% de redução proporcional."
-            ),
+        if d_rel > 0:
+            triangle, color, direction = "▲", "#c62828", "aumento"
+        elif d_rel < 0:
+            triangle, color, direction = "▼", "#2e7d32", "redução"
+        else:
+            triangle, color, direction = "•", "#1565c0", "estabilidade"
+
+        st.markdown(
+            f"<div style='display:flex;align-items:baseline;gap:0.6rem;margin-bottom:0.25rem;'>"
+            f"<span style='font-size:3rem;font-weight:700;color:{color};line-height:1;'>{triangle}</span>"
+            f"<span style='font-size:3rem;font-weight:700;color:{color};line-height:1;'>{abs(d_rel):.2f}%</span>"
+            f"</div>"
+            f"<div style='font-size:0.9rem;color:#6b7280;margin-bottom:1rem;'>"
+            f"Variação proporcional na sinistralidade</div>",
+            unsafe_allow_html=True,
         )
 
-        ee1, ee2 = st.columns(2)
-        ee1.metric(
-            "Beneficiários afetados",
-            f"{int(resultado.get('n_individuos_afetados', 0)):,}",
-            help="Quantidade de beneficiários elegíveis à intervenção, ou seja, que tiveram a feature modificada na simulação.",
-        )
-        ee2.metric(
-            "Beneficiários fora do escopo",
-            f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}",
-            help="Beneficiários que não atendem à regra de elegibilidade da intervenção e portanto não tiveram seus valores alterados.",
-        )
-
-        por_plano = resultado.get("por_plano", [])
-        if isinstance(por_plano, list) and len(por_plano) > 1:
-            st.markdown("**Detalhamento por plano**")
-            pp_rows = [
-                {
-                    "Plano": r.get("plano", "-"),
-                    "Antes": _fmt_pct(r.get("sinistralidade_antes")),
-                    "Depois": _fmt_pct(r.get("sinistralidade_depois")),
-                    "Delta p.p.": f"{float(r.get('delta_absoluto', 0)) * 100:+.2f}",
-                }
-                for r in por_plano
-            ]
-            st.dataframe(pd.DataFrame(pp_rows), hide_index=True, use_container_width=True)
+        accuracy_pct: float | None = None
+        macro_path = PREDICT_ROOT / last_ver / "resultado_macro.json"
+        if macro_path.is_file():
+            try:
+                macro = json.loads(macro_path.read_text(encoding="utf-8"))
+                erro = float(macro.get("erro_relativo", float("nan")))
+                if not np.isnan(erro):
+                    accuracy_pct = max(0.0, 1.0 - abs(erro)) * 100.0
+            except Exception:
+                accuracy_pct = None
 
         intervs = resultado.get("intervencoes", [])
         if isinstance(intervs, list) and intervs:
-            st.markdown("**Intervenções aplicadas**")
-            iv_df = pd.DataFrame(intervs)
-            iv_df["feature_label"] = iv_df.get("feature", iv_df.iloc[:, 0]).astype(str).map(_format_feature_name)
-            keep = [c for c in ["feature_label", "feature", "delta_pct"] if c in iv_df.columns]
-            st.dataframe(
-                iv_df[keep].rename(columns={"feature_label": "Feature", "feature": "Coluna", "delta_pct": "Delta (%)"}),
-                hide_index=True,
-                use_container_width=True,
+            partes = []
+            for i in intervs:
+                if not isinstance(i, dict):
+                    continue
+                f_label = _format_feature_name(str(i.get("feature", "")))
+                f_delta = float(i.get("delta_pct", 0.0))
+                partes.append(f"**{f_label}** em **{f_delta:+.0f}%**")
+            ajuste_desc = " e ".join(partes) if partes else "a intervenção selecionada"
+            acc_phrase = (
+                f"um modelo com **{accuracy_pct:.2f}%** de acertos sobre erros"
+                if accuracy_pct is not None
+                else "o modelo treinado"
             )
+            if d_rel == 0:
+                st.markdown(
+                    f"Com o ajuste de {ajuste_desc}, **não há variação esperada** no valor "
+                    f"da sinistralidade, considerando {acc_phrase}."
+                )
+            else:
+                st.markdown(
+                    f"Com o ajuste de {ajuste_desc}, há uma possibilidade de "
+                    f"**{direction} de {abs(d_rel):.2f}%** no valor da sinistralidade, "
+                    f"considerando {acc_phrase}."
+                )
 
-    with st.expander("Detalhes técnicos da execução", expanded=not ok):
-        st.code(out or "(sem saída)")
 
 
 PLANOS_SEM_FORECAST = {"MASTER EXECUTIVO"}

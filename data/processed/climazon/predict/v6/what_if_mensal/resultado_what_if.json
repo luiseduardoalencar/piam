@@ -1,38 +1,38 @@
 {
   "company": "climazon",
   "versao": "v6",
-  "data_execucao": "2026-05-14 13:18",
+  "data_execucao": "2026-05-23 15:56",
   "competencia_referencia": "2025-10",
   "planos_alvo": [
     "MASTER EMPRESARIAL"
   ],
-  "feature_intervencionada": "idade",
-  "delta_pct_aplicado": -9.0,
+  "feature_intervencionada": "qtd_servico_CONSULTA",
+  "delta_pct_aplicado": 44.0,
   "modo_idade": "simples",
   "intervencoes": [
     {
-      "feature": "idade",
-      "delta_pct": -9.0
+      "feature": "qtd_servico_CONSULTA",
+      "delta_pct": 44.0
     }
   ],
   "por_plano": [
     {
       "plano": "MASTER EMPRESARIAL",
       "n_individuos_total": 2116,
-      "n_individuos_afetados": 2081,
-      "pct_base_afetada": 98.35,
+      "n_individuos_afetados": 1857,
+      "pct_base_afetada": 87.76,
       "sinistralidade_antes": 0.6555889673018971,
-      "sinistralidade_depois": 0.6570615757030797,
-      "delta_absoluto": 0.0014726084011825735,
-      "delta_relativo_pct": 0.22462373142781109
+      "sinistralidade_depois": 0.6578599194961986,
+      "delta_absoluto": 0.002270952194301512,
+      "delta_relativo_pct": 0.34639878148769154
     }
   ],
   "plano": "MASTER EMPRESARIAL",
   "n_individuos_total": 2116,
-  "n_individuos_afetados": 2081,
-  "pct_base_afetada": 98.35,
+  "n_individuos_afetados": 1857,
+  "pct_base_afetada": 87.76,
   "sinistralidade_antes": 0.6555889673018971,
-  "sinistralidade_depois": 0.6570615757030797,
-  "delta_absoluto": 0.0014726084011825735,
-  "delta_relativo_pct": 0.22462373142781109
+  "sinistralidade_depois": 0.6578599194961986,
+  "delta_absoluto": 0.002270952194301512,
+  "delta_relativo_pct": 0.34639878148769154
 }

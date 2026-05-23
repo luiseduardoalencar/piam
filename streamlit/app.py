@@ -17,6 +17,7 @@ if str(_STREAMLIT_DIR) not in sys.path:
     sys.path.insert(0, str(_STREAMLIT_DIR))
 
 import app_climazon as _climazon
+from feature_labels import format_feature_name as _format_feature_name
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -607,44 +608,6 @@ def _sinistralidade_status(pct: float) -> tuple[str, str]:
     return "Alta sinistralidade", "#c62828"
 
 
-def _format_feature_name(feature: str) -> str:
-    mapping = {
-        "idade": "Idade",
-        "sexo": "Sexo",
-        "tipo_cadastro": "Cadastro",
-        "pct_urgencia": "Pct. urgência",
-        "qtd_servico_CONSULTA": "Qtd. consulta",
-        "qtd_esp_clin_geral": "Clínico geral",
-        "qtd_conta_PRONTO SOCORRO": "Pronto socorro",
-        "qtd_esp_outros": "Esp. outros",
-        "qtd_conta_ATENDIMENTO AMBULATORIAL": "Atend. amb.",
-        "qtd_servico_LABORATÓRIO": "Laboratório",
-        "qtd_conta_EXTERNO": "Conta externa",
-        "qtd_servico_ULTRA-SONOGRAFIA": "Ultrassom",
-        "qtd_servico_RADIOLOGIA": "Radiologia",
-        "qtd_esp_lab_imagem": "Lab. imagem",
-        "qtd_servico___OUTROS__": "Serv. outros",
-        "qtd_esp_cardio": "Esp. cardio",
-        "qtd_esp_gine": "Esp. gineco",
-        "qtd_esp_oftal": "Esp. oftalmo",
-        "qtd_servico_TOMOGRAFIA": "Tomografia",
-        "qtd_esp_orto": "Esp. ortopedia",
-        "qtd_conta_INTERNADO": "Conta internação",
-        "qtd_servico_CARDIOLOGIA": "Serv. cardio",
-        "qtd_servico_CIRURGICO": "Serv. cirúrgico",
-        "qtd_servico_FISIOTERAPIA": "Fisioterapia",
-        "valor_faturamento": "Faturamento",
-        "qtd_servico_CLÍNICO": "Serv. clínico",
-    }
-    if feature in mapping:
-        return mapping[feature]
-    label = feature.replace("tx_", "taxa ").replace("qtd_", "").replace("_", " ").strip()
-    words = [part.capitalize() for part in label.split() if part]
-    if not words:
-        return feature
-    return " ".join(words[:2])
-
-
 def _format_feature_value(payload: dict[str, Any], feature: str) -> str:
     if feature == "sexo":
         value = payload.get("sexo")
@@ -688,19 +651,19 @@ def _show_profile_modal(profile: dict[str, Any], highlight_features: list[str]) 
     payload = dict(profile["payload"])
     shown_front = {"idade", "sexo", *highlight_features}
     details_rows = [
-        {"Feature": _format_feature_name(k), "Valor": _format_feature_value(payload, k)}
+        {"Atributo": _format_feature_name(k), "Valor": _format_feature_value(payload, k)}
         for k in payload.keys()
         if k not in shown_front
     ]
     if details_rows:
         st.dataframe(pd.DataFrame(details_rows), width="stretch", hide_index=True)
     else:
-        st.info("Sem outras features para exibir.")
+        st.info("Sem outros atributos para exibir.")
 
 
 def render_prediction_tab() -> None:
-    st.header("Predição por features")
-    st.caption("Selecione grupo e feature para executar intervenção no pipeline real de predição.")
+    st.header("Predição por atributos")
+    st.caption("Selecione grupo e atributo para executar intervenção no pipeline real de predição.")
     kpi: dict[str, Any] | None = None
     try:
         kpi = load_kpi_mes_atual()
@@ -736,23 +699,16 @@ def render_prediction_tab() -> None:
 
     # UI sem escolha manual de versão: usa sempre a versão mais recente.
     version_label = versions[0]
-    ultimo_resultado = load_latest_what_if_result(version_label)
-    baseline_inicial = None
-    if ultimo_resultado and "sinistralidade_antes" in ultimo_resultado:
-        baseline_inicial = float(ultimo_resultado.get("sinistralidade_antes", float("nan")))
-    if st.session_state.get("pred_features_hide_baseline_ui"):
-        baseline_inicial = None
-    render_calibracao_mes_section(kpi_mes=kpi, baseline_predito=baseline_inicial)
 
     try:
         catalog = load_features_catalog(version_label)
     except Exception as e:
-        st.error(f"Falha ao carregar catálogo de features da versão {version_label}: {e}")
+        st.error(f"Falha ao carregar catálogo de atributos da versão {version_label}: {e}")
         return
 
     grupos = catalog.get("grupos", [])
     if not grupos:
-        st.warning("Catálogo sem grupos/features disponíveis.")
+        st.warning("Catálogo sem grupos/atributos disponíveis.")
         return
 
     grupo_nomes = [str(g.get("grupo", "sem_grupo")) for g in grupos]
@@ -761,18 +717,50 @@ def render_prediction_tab() -> None:
 
     features = grupo_obj.get("features", [])
     if not features:
-        st.warning("Grupo sem features disponíveis.")
+        st.warning("Grupo sem atributos disponíveis.")
         return
 
+    try:
+        corr_df, _ = load_feature_impact_csv()
+        corr_map = dict(zip(corr_df["feature"].astype(str), corr_df["abs_spearman"].astype(float)))
+    except Exception:
+        corr_map = {}
+    features = sorted(
+        features,
+        key=lambda f: corr_map.get(str(f.get("feature", "")), 0.0),
+        reverse=True,
+    )[:10]
+
     feat_labels = [
-        f"{_format_feature_name(str(f.get('feature', '')))}  | elegíveis(+): {f.get('n_elegiveis_delta_positivo', 0):,}"
+        f"{_format_feature_name(str(f.get('feature', '')))} — grau de impacto: {corr_map.get(str(f.get('feature', '')), 0.0):.3f}"
         for f in features
     ]
-    feat_idx = st.selectbox("Feature para intervenção", options=list(range(len(features))), format_func=lambda i: feat_labels[i])
+    col_feats, col_delta, col_big = st.columns([2, 2, 1], gap="medium")
+    with col_feats:
+        feat_idx = st.selectbox(
+            "Atributo para intervenção",
+            options=list(range(len(features))),
+            format_func=lambda i: feat_labels[i],
+        )
+    with col_delta:
+        delta_pct = st.slider(
+            "Delta da intervenção (%)",
+            min_value=-90.0,
+            max_value=200.0,
+            value=20.0,
+            step=1.0,
+        )
+    with col_big:
+        st.markdown(
+            f"<div style='text-align:center;padding-top:1.9rem;line-height:1.05;'>"
+            f"<div style='font-size:1.9rem;font-weight:700;color:#ff4757;'>{delta_pct:+.0f}%</div>"
+            f"<div style='font-size:0.72rem;color:#6b7280;margin-top:0.1rem;'>Delta aplicado</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
     feat = features[feat_idx]
     feat_name = str(feat.get("feature"))
 
-    delta_pct = st.slider("Delta da intervenção (%)", min_value=-90.0, max_value=200.0, value=20.0, step=1.0)
     modo_idade = "simples"
     if feat_name == "idade":
         modo_idade = st.radio(
@@ -842,73 +830,63 @@ def render_prediction_tab() -> None:
 
         if resultado:
             st.subheader("Resultado da Simulação")
-            rr1, rr2, rr3, rr4 = st.columns(4)
-            rr1.metric(
-                "Sinistralidade antes da simulação",
-                _fmt_sinistralidade_index_pct(resultado.get("sinistralidade_antes", 0.0)),
-                help="Índice de sinistralidade que o modelo prevê para o mês atual, sem aplicar a intervenção.",
-            )
-            rr2.metric(
-                "Sinistralidade depois da simulação",
-                _fmt_sinistralidade_index_pct(resultado.get("sinistralidade_depois", 0.0)),
-                help="Índice de sinistralidade que o modelo prevê após aplicar a intervenção escolhida.",
-            )
-            d_abs = float(resultado.get("delta_absoluto", 0.0))
+
             d_rel = float(resultado.get("delta_relativo_pct", 0.0))
-            _colored_metric(
-                rr3,
-                "Variação no índice",
-                f"{d_abs * 100.0:+.2f} p.p.",
-                is_good=(d_abs <= 0),
-                help_text=(
-                    "Diferença bruta entre depois e antes, em pontos percentuais (p.p.). "
-                    "Verde = sinistralidade caiu; vermelho = subiu. "
-                    "Exemplo: se a sinistralidade caiu de 100% para 95%, a variação é -5 p.p."
-                ),
-            )
-            _colored_metric(
-                rr4,
-                "Variação proporcional",
-                f"{d_rel:+.2f}%",
-                is_good=(d_rel <= 0),
-                help_text=(
-                    "Quanto a sinistralidade caiu ou subiu em termos relativos: "
-                    "(depois − antes) ÷ antes × 100. Verde = sinistralidade caiu; vermelho = subiu. "
-                    "Exemplo: cair de 100% para 95% representa -5% de redução proporcional."
-                ),
+            if d_rel > 0:
+                triangle, color, direction = "▲", "#c62828", "aumento"
+            elif d_rel < 0:
+                triangle, color, direction = "▼", "#2e7d32", "redução"
+            else:
+                triangle, color, direction = "•", "#1565c0", "estabilidade"
+
+            st.markdown(
+                f"<div style='display:flex;align-items:baseline;gap:0.6rem;margin-bottom:0.25rem;'>"
+                f"<span style='font-size:3rem;font-weight:700;color:{color};line-height:1;'>{triangle}</span>"
+                f"<span style='font-size:3rem;font-weight:700;color:{color};line-height:1;'>{abs(d_rel):.2f}%</span>"
+                f"</div>"
+                f"<div style='font-size:0.9rem;color:#6b7280;margin-bottom:1rem;'>"
+                f"Variação proporcional na sinistralidade</div>",
+                unsafe_allow_html=True,
             )
 
-            ee1, ee2 = st.columns(2)
-            ee1.metric(
-                "Beneficiários afetados",
-                f"{int(resultado.get('n_individuos_afetados', 0)):,}",
-                help="Quantidade de beneficiários elegíveis à intervenção, ou seja, que tiveram a feature modificada na simulação.",
-            )
-            ee2.metric(
-                "Beneficiários fora do escopo",
-                f"{int(resultado.get('n_individuos_nao_elegiveis', 0)):,}",
-                help="Beneficiários que não atendem à regra de elegibilidade da intervenção e portanto não tiveram seus valores alterados.",
-            )
+            accuracy_pct: float | None = None
+            macro_path = PREDICT_ROOT / last_ver / "resultado_macro.json"
+            if macro_path.is_file():
+                try:
+                    macro = json.loads(macro_path.read_text(encoding="utf-8"))
+                    erro = float(macro.get("erro_relativo", float("nan")))
+                    if not np.isnan(erro):
+                        accuracy_pct = max(0.0, 1.0 - abs(erro)) * 100.0
+                except Exception:
+                    accuracy_pct = None
 
-            st.markdown("**Explicabilidade da intervenção**")
             intervs = resultado.get("intervencoes", [])
             if isinstance(intervs, list) and intervs:
-                exp_df = pd.DataFrame(intervs)
-                if not exp_df.empty:
-                    if "feature" in exp_df.columns:
-                        exp_df["feature_label"] = exp_df["feature"].astype(str).map(_format_feature_name)
-                    show_cols = [c for c in ["feature_label", "feature", "delta_pct"] if c in exp_df.columns]
-                    st.dataframe(
-                        exp_df[show_cols].rename(
-                            columns={
-                                "feature_label": "Feature",
-                                "feature": "Coluna técnica",
-                                "delta_pct": "Delta (%)",
-                            }
-                        ),
-                        width="stretch",
-                        hide_index=True,
+                partes = []
+                for i in intervs:
+                    if not isinstance(i, dict):
+                        continue
+                    f_label = _format_feature_name(str(i.get("feature", "")))
+                    f_delta = float(i.get("delta_pct", 0.0))
+                    partes.append(f"**{f_label}** em **{f_delta:+.0f}%**")
+                ajuste_desc = " e ".join(partes) if partes else "a intervenção selecionada"
+                acc_phrase = (
+                    f"um modelo com **{accuracy_pct:.2f}%** de acertos sobre erros"
+                    if accuracy_pct is not None
+                    else "o modelo treinado"
+                )
+                if d_rel == 0:
+                    st.markdown(
+                        f"Com o ajuste de {ajuste_desc}, **não há variação esperada** no valor "
+                        f"da sinistralidade, considerando {acc_phrase}."
                     )
+                else:
+                    st.markdown(
+                        f"Com o ajuste de {ajuste_desc}, há uma possibilidade de "
+                        f"**{direction} de {abs(d_rel):.2f}%** no valor da sinistralidade, "
+                        f"considerando {acc_phrase}."
+                    )
+
             if feat_name == "idade":
                 st.caption(
                     f"Modo de idade aplicado: **{MODO_IDADE_LABEL.get(modo_idade, modo_idade)}** (`{modo_idade}`)"
@@ -923,7 +901,7 @@ def render_prediction_tab() -> None:
                     if "feature" in rel_df.columns:
                         rel_df["feature_label"] = rel_df["feature"].astype(str).map(_format_feature_name)
                     cols_map = {
-                        "feature_label": "Feature",
+                        "feature_label": "Atributo",
                         "feature": "Coluna técnica",
                         "delta_pct": "Delta (%)",
                         "n_elegiveis": "Elegíveis",
@@ -945,13 +923,11 @@ def render_prediction_tab() -> None:
             if pct_base is not None:
                 st.caption(f"Percentual da base afetada: {float(pct_base):.2f}%")
 
-        with st.expander("Detalhes técnicos da execução", expanded=not ok):
-            st.code(out or "(sem saída)")
 
 
 def render_feature_impact_tab() -> None:
     st.header("Correlação")
-    st.caption("Análise de correlação Spearman por competência (mês).")
+    st.caption("Análise de correlação por competência (mês).")
 
     try:
         ver_dir, comps = list_feature_impact_competencias()
@@ -961,7 +937,6 @@ def render_feature_impact_tab() -> None:
     if comps:
         comp_default = comps[-1]
         comp_sel = st.selectbox("Competência", options=comps, index=len(comps) - 1)
-        st.caption(f"Versão ativa: {ver_dir.name}")
         df, comp_loaded = load_feature_impact_csv(comp_sel)
     else:
         df, comp_loaded = load_feature_impact_csv(None)
@@ -972,16 +947,25 @@ def render_feature_impact_tab() -> None:
     df = df[~df["feature"].isin(QUASI_LEAKAGE_HIDE)].copy()
     df["feature_label"] = df["feature"].map(_format_feature_name)
 
-    st.metric("Total de features", len(df))
+    st.metric(
+        "Atributos da carteira analisados",
+        len(df),
+        help=(
+            "Quantidade de atributos da carteira avaliados quanto à correlação com a sinistralidade. "
+            "Inclui perfil do beneficiário (idade, sexo, cadastro), padrão de utilização do plano "
+            "(consultas, exames, especialidades, internações) e indicadores financeiros (faturamento, urgência)."
+        ),
+    )
     st.dataframe(
         df[["feature_label", "spearman"]].rename(
             columns={
-                "feature_label": "Feature",
+                "feature_label": "Atributo",
                 "spearman": "Grau de impacto"
             }
         ),
         width="stretch",
         hide_index=True,
+        height=200,
     )
 
     top_n = st.slider("Top N por Grau de Impacto", min_value=5, max_value=min(30, len(df)), value=15)
@@ -995,9 +979,9 @@ def render_feature_impact_tab() -> None:
         orientation="h",
         color="sentido",
         color_discrete_map={"Positivo": "#2e7d32", "Negativo": "#c62828"},
-        title=f"Top {top_n} features por Grau de Impacto",
+        title=f"Top {top_n} atributos por Grau de Impacto",
         labels={
-            "feature_label": "Feature",
+            "feature_label": "Atributo",
             "spearman": "Grau de impacto",
             "sentido": "Impacto",
         },

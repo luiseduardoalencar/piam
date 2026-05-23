@@ -1,15 +1,15 @@
 {
   "competencia_referencia": "2025-10",
   "sinistralidade_antes": 0.947181,
-  "sinistralidade_depois": 0.947056,
-  "delta_absoluto": -0.00012531,
-  "delta_relativo_pct": -0.0132,
+  "sinistralidade_depois": 0.844485,
+  "delta_absoluto": -0.10269617,
+  "delta_relativo_pct": -10.8423,
   "n_individuos_afetados": 2617,
   "n_individuos_nao_elegiveis": 0,
   "intervencoes": [
     {
-      "feature": "qtd_servico_RESSONÂNCIA MAGNÉTICA",
-      "delta_pct": 63.0
+      "feature": "qtd_eventos_sinistro",
+      "delta_pct": -33.0
     }
   ],
   "modo_idade": "simples",
